@@ -11,7 +11,6 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -146,50 +145,48 @@ class AgentService : Service() {
     }
 
     // --- network watchdog -----------------------------------------------------
+    // Use the DEFAULT-network callback: it fires when the network the app's
+    // traffic actually uses changes (wifi<->cellular), not on every signal blip.
+    // We reconnect ONLY on a genuine handover and never cancel a healthy socket,
+    // so in-flight commands aren't killed on a multi-homed/flapping device.
+
+    @Volatile private var connectedNetHandle = 0L
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { evaluateNetwork() }
+        override fun onAvailable(network: Network) {
+            AgentState.network = typeOf(connectivity.getNetworkCapabilities(network))
+            if (AgentState.conn == AgentState.Conn.CONNECTED &&
+                connectedNetHandle == network.networkHandle) return // same network, keep socket
+            AgentState.lastEvent = "default network → ${AgentState.network}"
+            scheduleSwitchReconnect()
+        }
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            AgentState.network = typeOf(caps) // label only — no reconnect on signal changes
+        }
         override fun onLost(network: Network) {
             AgentState.network = "none"; AgentState.lastEvent = "network lost"
         }
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            val type = when {
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-                else -> "other"
-            }
-            val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            if (AgentState.network != type) {
-                AgentState.network = type
-                AgentState.lastEvent = "network → $type"
-            }
-            if (validated) scheduleImmediateReconnect()
-        }
+    }
+
+    private fun typeOf(caps: NetworkCapabilities?): String = when {
+        caps == null -> "none"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+        else -> "other"
     }
 
     private fun registerNetworkCallback() {
-        val req = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        try { connectivity.registerNetworkCallback(req, netCallback) } catch (e: Throwable) {
-            Log.e(TAG, "registerNetworkCallback failed", e)
+        try { connectivity.registerDefaultNetworkCallback(netCallback) } catch (e: Throwable) {
+            Log.e(TAG, "registerDefaultNetworkCallback failed", e)
         }
     }
 
-    private fun evaluateNetwork() {
-        val caps = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
-        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
-            scheduleImmediateReconnect()
-        }
-    }
-
-    // Debounce: network callbacks fire in bursts; collapse to one reconnect.
-    private val reconnectRunnable = Runnable { forceReconnect("network changed") }
-    private fun scheduleImmediateReconnect() {
+    private val switchReconnect = Runnable { forceReconnect("network switch") }
+    private fun scheduleSwitchReconnect() {
         if (stopped) return
-        main.removeCallbacks(reconnectRunnable)
-        main.postDelayed(reconnectRunnable, 400)
+        main.removeCallbacks(switchReconnect)
+        main.postDelayed(switchReconnect, 800)
     }
 
     private fun forceReconnect(reason: String) {
@@ -258,6 +255,7 @@ class AgentService : Service() {
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             backoffMs = 1000
+            connectedNetHandle = connectivity.activeNetwork?.networkHandle ?: 0L
             AgentState.conn = AgentState.Conn.CONNECTED
             AgentState.connectedSince = System.currentTimeMillis()
             AgentState.lastEvent = "connected"
