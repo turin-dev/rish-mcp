@@ -1,0 +1,14 @@
+node_modules/
+server/dist/
+server/.env
+app/.gradle/
+app/.dockerhome/
+app/build/
+app/app/build/
+app/release.keystore
+app/rish-mcp-agent.apk
+app/build.log
+
+/.env
+app/.android/
+app/analytics.settings

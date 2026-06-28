@@ -1,0 +1,26 @@
+# Dokploy "Compose" stack for the relay+MCP server.
+# Traefik (dokploy-traefik) terminates TLS for the chosen hostname and routes
+# both the MCP endpoint (/mcp) and the phone relay WebSocket (/agent) to :8080.
+services:
+  rish-mcp:
+    build:
+      context: ./server
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      AI_TOKEN: "${AI_TOKEN}"
+      DEVICE_TOKEN: "${DEVICE_TOKEN}"
+      DEFAULT_TIMEOUT_MS: "60000"
+      MAX_TIMEOUT_MS: "600000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.rishmcp.rule=Host(`${MCP_HOST}`)
+      - traefik.http.routers.rishmcp.entrypoints=websecure
+      - traefik.http.routers.rishmcp.tls.certresolver=letsencrypt
+      - traefik.http.services.rishmcp.loadbalancer.server.port=8080
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true

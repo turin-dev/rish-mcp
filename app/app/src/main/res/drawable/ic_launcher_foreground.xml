@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- a simple terminal ">_" glyph -->
+    <path
+        android:fillColor="#3DDC97"
+        android:pathData="M36,42 l12,12 l-12,12 l-5,-5 l7,-7 l-7,-7 z" />
+    <path
+        android:fillColor="#3DDC97"
+        android:pathData="M52,62 h22 v7 h-22 z" />
+</vector>

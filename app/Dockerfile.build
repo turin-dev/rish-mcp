@@ -1,0 +1,30 @@
+# Android build toolchain (SDK + Gradle) — used only to assemble the APK.
+# Nothing from this image runs in production; it just produces app-release.apk.
+FROM eclipse-temurin:17-jdk-jammy
+
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV DEBIAN_FRONTEND=noninteractive
+ARG CLT_VERSION=11076708
+ARG GRADLE_VERSION=8.9
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends unzip curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Android command-line tools + platform/build-tools for API 35
+RUN mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" && \
+    curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${CLT_VERSION}_latest.zip" -o /tmp/clt.zip && \
+    unzip -q /tmp/clt.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" && \
+    mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" && \
+    rm /tmp/clt.zip
+ENV PATH="$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools"
+RUN yes | sdkmanager --licenses >/dev/null 2>&1 && \
+    sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null && \
+    chmod -R a+rX "$ANDROID_SDK_ROOT"
+
+# Gradle (invoked directly; no wrapper needed)
+RUN curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/g.zip && \
+    unzip -q /tmp/g.zip -d /opt && rm /tmp/g.zip && \
+    ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle
+
+WORKDIR /work
