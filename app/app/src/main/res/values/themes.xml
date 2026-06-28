@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.RishMcp" parent="Theme.AppCompat.DayNight.DarkActionBar" />
+    <style name="Theme.RishMcp" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorPrimaryContainer">@color/brand_dim</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
 </resources>

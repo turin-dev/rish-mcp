@@ -12,6 +12,10 @@ services:
       DEVICE_TOKEN: "${DEVICE_TOKEN}"
       DEFAULT_TIMEOUT_MS: "60000"
       MAX_TIMEOUT_MS: "600000"
+      APK_PATH: "/srv/agent.apk"
+    volumes:
+      # OTA: expose the latest built APK (read-only) at GET /agent.apk?t=DEVICE_TOKEN
+      - ./app/rish-mcp-agent.apk:/srv/agent.apk:ro
     labels:
       - traefik.enable=true
       - traefik.http.routers.rishmcp.rule=Host(`${MCP_HOST}`)

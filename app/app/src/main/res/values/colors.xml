@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#3DDC97</color>
+    <color name="brand_dim">#123A2C</color>
+    <color name="status_green">#2ECC71</color>
+    <color name="status_amber">#F5A623</color>
+    <color name="status_red">#E74C3C</color>
+    <color name="status_grey">#9AA0A6</color>
+</resources>

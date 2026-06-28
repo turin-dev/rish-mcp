@@ -12,3 +12,4 @@ app/build.log
 /.env
 app/.android/
 app/analytics.settings
+app/.kotlin/

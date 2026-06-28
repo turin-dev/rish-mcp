@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
 import express, { type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
@@ -105,6 +106,23 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, devices: registry.list().length });
+});
+
+// OTA: serve the agent APK so a phone can self-update via curl (no sshd needed).
+// Token-gated with the device token; path is mounted read-only into the container.
+const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
+app.get("/agent.apk", (req: Request, res: Response) => {
+  if ((req.query.t ?? "") !== DEVICE_TOKEN) {
+    res.status(401).type("text/plain").send("unauthorized");
+    return;
+  }
+  if (!existsSync(APK_PATH)) {
+    res.status(404).type("text/plain").send("apk not available");
+    return;
+  }
+  res.setHeader("Content-Type", "application/vnd.android.package-archive");
+  res.setHeader("Content-Length", String(statSync(APK_PATH).size));
+  res.sendFile(APK_PATH);
 });
 
 function checkAiAuth(req: Request, res: Response): boolean {
