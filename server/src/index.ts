@@ -7,6 +7,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registry, type Device } from "./relay.js";
+import { OAuthProvider } from "./oauth.js";
 
 // ---------------------------------------------------------------------------
 // Config (all via env; see .env.example)
@@ -16,6 +17,10 @@ const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must presen
 const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the phone presents
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
 const MAX_TIMEOUT_MS = Number(process.env.MAX_TIMEOUT_MS ?? 600_000);
+// External base URL, used in OAuth metadata/redirects (claude.ai connectors).
+const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
+
+const oauth = new OAuthProvider({ publicUrl: PUBLIC_URL, aiToken: AI_TOKEN });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -31,7 +36,7 @@ function requireEnv(name: string): string {
 // ---------------------------------------------------------------------------
 function buildMcpServer(): McpServer {
   const server = new McpServer(
-    { name: "rish-mcp", version: "0.1.0" },
+    { name: "rish-mcp", version: "0.2.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -102,7 +107,12 @@ function buildMcpServer(): McpServer {
 // HTTP app
 // ---------------------------------------------------------------------------
 const app = express();
+// Traefik fronts this container (no host port is published), so forwarded
+// headers are trustworthy; needed for the per-IP throttle in the OAuth flow.
+app.set("trust proxy", true);
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false })); // OAuth form + token endpoints
+app.use(oauth.router());
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, devices: registry.list().length });
@@ -128,8 +138,10 @@ app.get("/agent.apk", (req: Request, res: Response) => {
 function checkAiAuth(req: Request, res: Response): boolean {
   const auth = req.header("authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (token !== AI_TOKEN) {
-    res.status(401).json({
+  // Static AI_TOKEN (Claude Code, curl) or an OAuth access token (claude.ai).
+  if (token !== AI_TOKEN && !oauth.verifyAccessToken(token)) {
+    // resource_metadata pointer lets OAuth-capable MCP clients discover the flow.
+    res.status(401).set("WWW-Authenticate", oauth.wwwAuthenticate()).json({
       jsonrpc: "2.0",
       error: { code: -32001, message: "unauthorized" },
       id: null,
@@ -242,6 +254,7 @@ function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: strin
 
 httpServer.listen(PORT, () => {
   console.log(`rish-mcp server listening on :${PORT}`);
-  console.log(`  MCP (AI):   POST /mcp        (Bearer AI_TOKEN)`);
+  console.log(`  MCP (AI):   POST /mcp        (Bearer AI_TOKEN or OAuth access token)`);
+  console.log(`  OAuth:      ${PUBLIC_URL}/oauth/authorize (claude.ai connectors)`);
   console.log(`  Relay (phone): WS  /agent?token=DEVICE_TOKEN&deviceId=...`);
 });

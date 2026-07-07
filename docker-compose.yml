@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
+      PUBLIC_URL: "https://${MCP_HOST}"
       AI_TOKEN: "${AI_TOKEN}"
       DEVICE_TOKEN: "${DEVICE_TOKEN}"
       DEFAULT_TIMEOUT_MS: "60000"
