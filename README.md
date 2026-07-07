@@ -13,6 +13,10 @@ an **MCP tool** — **without VPN, adb, or sshd**. The phone holds a single
 
 Phone has **zero inbound** exposure (works behind SKT CGNAT). No VPN, no adb, no sshd.
 
+> 📖 **Full walkthrough** — deploy, install on the phone, connect every client
+> (incl. the Claude mobile app via OAuth), tool reference, recipes,
+> troubleshooting, and the threat model: **[docs/USAGE.md](docs/USAGE.md)**.
+
 ## Components
 
 - `server/` — Node/TS. Streamable-HTTP **MCP server** (`run_shell`, `list_devices`)
