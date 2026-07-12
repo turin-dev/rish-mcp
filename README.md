@@ -2,16 +2,23 @@
 
 Expose an Android phone's **Shizuku shell** (uid 2000, like `adb shell`) to AIs as
 an **MCP tool** — **without VPN, adb, or sshd**. The phone holds a single
-**outbound** WebSocket to a relay on `example.com`; AIs call the relay's MCP endpoint.
+**outbound** WebSocket to a relay on a public hostname you control; AIs call the relay's MCP endpoint.
 
 ```
 ┌─────────┐  MCP run_shell    ┌──────────────────────┐   WS (outbound)   ┌──────────────┐
-│   AI    │ ──HTTPS+Bearer──▶ │  example.com relay+MCP  │ ◀── phone dials ──│  phone APK   │
+│   AI    │ ──HTTPS+Bearer──▶ │     relay + MCP      │ ◀── phone dials ──│  phone APK   │
 │(Claude) │ ◀── stdout/code── │   (Node, Dokploy)    │ ── exec cmd ─────▶│ Shizuku→shell │
 └─────────┘                   └──────────────────────┘                   └──────────────┘
 ```
 
 Phone has **zero inbound** exposure (works behind SKT CGNAT). No VPN, no adb, no sshd.
+
+> [!IMPORTANT]
+> `mcp.example.com` is a **placeholder**, not a service provided by this project,
+> and Claude does not replace it automatically. Deploy the relay first, then
+> replace it everywhere with the public hostname you configured as `MCP_HOST`.
+> For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector URL is
+> `https://phone.yourdomain.com/mcp`.
 
 > 📖 **Full walkthrough** — deploy, install on the phone, connect every client
 > (incl. the Claude mobile app via OAuth), tool reference, recipes,
@@ -36,10 +43,18 @@ cd app && ./build-apk.sh        # -> app/rish-mcp-agent.apk
 
 ## Deploy (relay+MCP)
 
-Tokens live in `server/.env` (gitignored). Deploy `docker-compose.yml` as a Dokploy
-**Compose** app with `AI_TOKEN`/`DEVICE_TOKEN` env, routed by Traefik to `mcp.example.com`.
-Add a Cloudflare A record `mcp.example.com → <server-ip>` (orange/proxied is fine for
-HTTPS+WSS over :443).
+Tokens live in `server/.env` (gitignored). Choose a public hostname you control
+and set it as `MCP_HOST`; all `mcp.example.com` URLs below are placeholders for
+that hostname. For example:
+
+```ini
+MCP_HOST=phone.yourdomain.com
+```
+
+Deploy `docker-compose.yml` as a Dokploy **Compose** app with
+`AI_TOKEN`/`DEVICE_TOKEN` env, routed by Traefik to that hostname. Then add a
+Cloudflare A record such as `phone.yourdomain.com → <server-ip>`
+(orange/proxied is fine for HTTPS+WSS over :443).
 
 ## Install on phone
 
@@ -130,11 +145,15 @@ curl -s https://mcp.example.com/mcp \
 registration + PKCE), which is what claude.ai custom connectors require — they
 don't support static bearer tokens.
 
-1. On **claude.ai → Settings → Connectors → Add custom connector**, enter
-   `https://mcp.example.com/mcp`. No client ID/secret needed.
-2. Click **Connect** — you land on the rish-mcp consent page. Paste your
+1. Find the public hostname you set as `MCP_HOST` when deploying the relay.
+   Append `/mcp` to it: for example, `MCP_HOST=phone.yourdomain.com` becomes
+   `https://phone.yourdomain.com/mcp`. Replace `yourdomain.com` with your
+   actual domain; do **not** enter `mcp.example.com` as-is.
+2. On **claude.ai → Settings → Connectors → Add custom connector**, enter that
+   URL. No client ID/secret is needed.
+3. Click **Connect** — you land on the rish-mcp consent page. Paste your
    `AI_TOKEN` (the same one from `.env`) once to authorize.
-3. Done. The connector syncs to the Claude mobile/desktop apps automatically;
+4. Done. The connector syncs to the Claude mobile/desktop apps automatically;
    enable it in the chat's connector menu. Claude calls the relay from
    Anthropic's cloud, so this works from anywhere — including the Claude app
    on the very phone being controlled.
