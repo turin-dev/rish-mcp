@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
@@ -17,7 +18,8 @@ const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
 const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
 // The APK this relay hands out, and therefore what "latest" means to it.
-const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
+// Resolved: res.sendFile() rejects relative paths.
+const APK_PATH = resolve(process.env.APK_PATH ?? "/srv/agent.apk");
 // Fallback for when no APK is mounted; also the explicit override.
 const FALLBACK_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
 const FALLBACK_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);

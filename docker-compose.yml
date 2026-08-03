@@ -1,6 +1,10 @@
-# Dokploy "Compose" stack for the relay+MCP server.
-# Traefik (dokploy-traefik) terminates TLS for the chosen hostname and routes
-# both the MCP endpoint (/mcp) and the phone relay WebSocket (/agent) to :8080.
+# Dokploy "Compose" stack.
+#
+# Two hostnames, two containers, deliberately separated:
+#   MCP_HOST         private — the relay. MCP endpoint (/mcp) and the device
+#                    WebSocket (/agent), both token-gated. Shell access lives here.
+#   PUBLIC_MCP_HOST  public  — release metadata and the agent APK. No secrets, no
+#                    device information, no route to the relay.
 services:
   rish-mcp:
     build:
@@ -23,6 +27,28 @@ services:
       - traefik.http.routers.rishmcp.entrypoints=websecure
       - traefik.http.routers.rishmcp.tls.certresolver=letsencrypt
       - traefik.http.services.rishmcp.loadbalancer.server.port=8080
+    networks:
+      - dokploy-network
+
+  # Same image, different entrypoint: it never constructs the relay, so this
+  # container has no AI_TOKEN/DEVICE_TOKEN and nothing to leak if it is abused.
+  rish-mcp-public:
+    build:
+      context: ./server
+    command: ["node", "dist/public.js"]
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      APK_PATH: "/srv/agent.apk"
+      DOWNLOADS_PER_HOUR: "30"
+    volumes:
+      - ./app/rish-mcp-agent.apk:/srv/agent.apk:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.rishmcppublic.rule=Host(`${PUBLIC_MCP_HOST}`)
+      - traefik.http.routers.rishmcppublic.entrypoints=websecure
+      - traefik.http.routers.rishmcppublic.tls.certresolver=letsencrypt
+      - traefik.http.services.rishmcppublic.loadbalancer.server.port=8080
     networks:
       - dokploy-network
 

@@ -213,6 +213,46 @@ try {
   await multi.close();
   phone.close();
   agent.close();
+
+  // --- public release endpoint (separate process, separate hostname) ---
+  const PUB = 8097;
+  const pub = spawn("node", ["dist/public.js"], {
+    env: { ...process.env, PORT: String(PUB), APK_PATH, DOWNLOADS_PER_HOUR: "3" },
+    stdio: "inherit",
+  });
+  const pubBase = `http://127.0.0.1:${PUB}`;
+  try {
+    await sleep(600);
+
+    const pubRel = await (await fetch(`${pubBase}/api/version/release`)).json();
+    assert(pubRel.versionCode === rel.versionCode && pubRel.versionName === rel.versionName,
+      "public endpoint reports the same release as the relay");
+    assert(pubRel.download === "/agent.apk", "public release advertises a tokenless download");
+
+    // The whole point of the split: the public host must not reach the relay.
+    for (const path of ["/mcp", "/agent", "/.well-known/oauth-authorization-server"]) {
+      const r = await fetch(`${pubBase}${path}`);
+      assert(r.status === 404, `public host has no ${path}`);
+    }
+
+    if (hasApk) {
+      const dl = await fetch(`${pubBase}/agent.apk`);
+      const bytes = Buffer.from(await dl.arrayBuffer());
+      assert(dl.status === 200, "public APK download needs no token");
+      assert(createHash("sha256").update(bytes).digest("hex") === pubRel.sha256,
+        "downloaded APK matches the advertised sha256");
+      assert(dl.headers.get("content-type") === "application/vnd.android.package-archive",
+        "APK is served with the android package content type");
+
+      // DOWNLOADS_PER_HOUR=3: one above plus two more, then the fourth is refused.
+      await fetch(`${pubBase}/agent.apk`);
+      await fetch(`${pubBase}/agent.apk`);
+      assert((await fetch(`${pubBase}/agent.apk`)).status === 429,
+        "public APK download is rate limited per IP");
+    }
+  } finally {
+    pub.kill("SIGTERM");
+  }
 } catch (e) {
   console.error("THREW:", e);
   failed = true;

@@ -80,7 +80,8 @@ echo "DEVICE_TOKEN=$(openssl rand -hex 24)"  >> .env
 ```
 
 ```ini
-MCP_HOST=mcp.example.com          # public hostname (Traefik routes this to :8080)
+MCP_HOST=mcp.example.com          # private: MCP + device WebSocket
+PUBLIC_MCP_HOST=dl.example.com    # public: release metadata + APK, no secrets
 AI_TOKEN=<64 hex chars>           # the "master key" for AI clients — treat like an SSH key
 DEVICE_TOKEN=<48 hex chars>       # shared secret the phone presents on the WS
 # PUBLIC_URL is derived from MCP_HOST by docker-compose; only set it manually
@@ -102,7 +103,8 @@ public.
 
 ### 2.4 DNS + TLS
 
-Point an `A` record at the host: `mcp.example.com → <server-ip>`. Behind
+Point an `A` record at the host for **both** names — `mcp.example.com` and
+`dl.example.com` → `<server-ip>`; Traefik issues a certificate per name. Behind
 Cloudflare, **orange-cloud (proxied) is fine** — HTTPS and WSS both ride `:443`,
 including the phone's `/agent` WebSocket. Traefik obtains the certificate via its
 configured resolver (Let's Encrypt in the sample labels).
@@ -198,6 +200,15 @@ can update itself over the same channel — no `adb`/`sshd`:
 ```bash
 rish -c 'curl -sfL "https://mcp.example.com/agent.apk?t=<DEVICE_TOKEN>" -o /data/local/tmp/r.apk \
   && pm install -r -g /data/local/tmp/r.apk && rm -f /data/local/tmp/r.apk'
+```
+
+**Public downloads.** `PUBLIC_MCP_HOST` runs a second, separate container that serves
+the same APK with no token at `GET /agent.apk`, plus its metadata. It shares only the
+read-only APK volume — it cannot reach the relay, holds no tokens, and says nothing
+about connected devices. The download is rate limited per IP (`DOWNLOADS_PER_HOUR`).
+
+```bash
+curl -sO https://dl.example.com/agent.apk        # no token needed
 ```
 
 **Knowing when to update.** Each agent reports its version when it connects, and the
@@ -583,5 +594,7 @@ socket and fails its in-flight commands with `device reconnected`.
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
 | `APK_PATH` | | `/srv/agent.apk` | Path the OTA endpoint serves |
+| `PUBLIC_MCP_HOST` | compose | — | Public hostname for the release/APK container |
+| `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on the public, tokenless APK download |
 | `LATEST_AGENT_VERSION` | | read from the APK at `APK_PATH` | Overrides the version name devices are compared against for `updateAvailable` |
 | `LATEST_AGENT_VERSION_CODE` | | read from the APK at `APK_PATH` | Overrides the version code devices are compared against for `updateAvailable` |

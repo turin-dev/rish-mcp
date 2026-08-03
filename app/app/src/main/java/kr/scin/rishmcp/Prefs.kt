@@ -10,7 +10,7 @@ object Prefs {
     fun get(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
     var Context.relayUrl: String
-        get() = get(this).getString("relayUrl", "wss://rish-mcp.turin.my/agent") ?: ""
+        get() = get(this).getString("relayUrl", "wss://mcp.turin.my/agent") ?: ""
         set(v) { get(this).edit().putString("relayUrl", v).apply() }
 
     var Context.deviceToken: String

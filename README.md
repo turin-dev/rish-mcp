@@ -21,10 +21,10 @@ The same APK supports normal Android phones/tablets and Wear OS watches.
 > `MCP_HOST`. For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector
 > URL is `https://phone.yourdomain.com/mcp`.
 >
-> The APK and `.env.example` in this repo default to the maintainer's gateway
-> (`rish-mcp.turin.my`). That gateway will not accept your `DEVICE_TOKEN`, so point
-> the agent at your own relay — via the app's Relay URL field, the `--es relay`
-> provisioning extra, or by editing `Prefs.kt` before building.
+> The APK and `.env.example` in this repo default to the maintainer's relay
+> (`mcp.turin.my`). That relay will not accept your `DEVICE_TOKEN`, so point the
+> agent at your own — via the app's Relay URL field, the `--es relay` provisioning
+> extra, or by editing `Prefs.kt` before building.
 
 > 📖 **Full walkthrough** — deploy, install on Android, connect every client
 > (incl. the Claude mobile app via OAuth), tool reference, recipes,
@@ -34,10 +34,24 @@ The same APK supports normal Android phones/tablets and Wear OS watches.
 >
 > 🔐 **Official APK signing** — required GitHub Secrets and release signing behavior: **[docs/SIGNING.md](docs/SIGNING.md)**.
 
+## Two hostnames
+
+The deployment splits along a trust boundary — one process each, so the public
+hostname has no route to the relay even if a proxy rule is wrong:
+
+| Host | Serves | Auth |
+|---|---|---|
+| `MCP_HOST` (private) | `POST /mcp`, `WS /agent`, `/healthz`, OAuth | `AI_TOKEN` / `DEVICE_TOKEN` |
+| `PUBLIC_MCP_HOST` (public) | `GET /api/version/release`, `GET /agent.apk` | none — no secrets, no device info |
+
+Shell access lives entirely on the private host. The public one only answers
+"which agent build is current" and hands out that APK.
+
 ## Components
 
 - `server/` — Node/TS. Streamable-HTTP **MCP server** (`run_shell`, `list_devices`)
-  + **WS relay** the Android device connects to. Bearer auth for AIs, shared token for the device.
+  + **WS relay** the Android device connects to. Bearer auth for AIs, shared token
+  for the device. A second entrypoint (`dist/public.js`) serves the public host.
 - `app/` — Android (Kotlin). One installable **APK**: binds a Shizuku `UserService`
   to run commands as shell uid, a foreground service holds the outbound WS, auto-starts on boot.
 
@@ -127,8 +141,8 @@ Then the AI has two tools:
 
 - `list_devices()` — Android devices currently connected to the relay, with each
   device's agent version and an `updateAvailable` flag when it is older than the
-  APK the relay serves (`GET /api/version/release` reports that version, parsed
-  live from the APK itself)
+  APK the relay serves (`GET /api/version/release` on either host reports that
+  version, parsed live from the APK itself)
 - `run_shell({cmd, deviceId?, timeoutMs?})` — run a command as shell uid;
   returns stdout, stderr and the exit code. `deviceId` is optional when
   exactly one device is online.
