@@ -1,6 +1,6 @@
 # Official APK signing
 
-`master` pushes build the official `rish-mcp-agent.apk` with one persistent Android signing key.
+Pushes to `master` or `main` build the official `rish-mcp-agent.apk` with one persistent Android signing key.
 Pull requests and development branches use a disposable CI key and produce test-only APKs.
 
 ## Required GitHub repository secrets
@@ -14,7 +14,7 @@ Add these under **Settings → Secrets and variables → Actions → Repository 
 | `ANDROID_KEY_ALIAS` | Key alias, normally `rishmcp` |
 | `ANDROID_KEY_PASSWORD` | Private key password |
 
-The official workflow intentionally fails if any of these secrets are missing. It never falls back to a generated key for a `master` release build.
+The official workflow intentionally fails if any of these secrets are missing. It never falls back to a generated key for an official branch build.
 
 ## Create a signing key once
 
@@ -52,7 +52,7 @@ base64 < release.keystore | tr -d '\n'
 
 Copy the single-line output into `ANDROID_KEYSTORE_BASE64`.
 
-## What happens on `master`
+## What happens on `master` / `main`
 
 1. Server TypeScript build and end-to-end MCP smoke test run.
 2. The keystore is restored from GitHub Secrets.
@@ -69,4 +69,4 @@ Official artifacts are retained for 90 days.
 
 ## Development builds
 
-PRs, `agent/**` pushes, and manual workflow runs outside `master` create a test artifact named `rish-mcp-test-<commit-sha>`. Those builds use a disposable CI signing key and must not be used as an update path for official installations.
+PRs, `agent/**` pushes, and manual workflow runs outside `master` / `main` create a test artifact named `rish-mcp-test-<commit-sha>`. Those builds use a disposable CI signing key and must not be used as an update path for official installations.
