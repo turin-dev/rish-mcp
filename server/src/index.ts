@@ -223,10 +223,12 @@ function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: strin
   registry.add(device);
   console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk})`);
 
-  // Keepalive: the relay pings; the Android device keeps the outbound socket warm.
+  // Wear OS keeps the radio asleep longer: the watch disables client pings and
+  // relies on this lower-frequency relay keepalive. Handheld behavior stays as-is.
+  const pingEveryMs = kind === "watch" ? 60_000 : 25_000;
   const ping = setInterval(() => {
     if (ws.readyState === ws.OPEN) ws.ping();
-  }, 25_000);
+  }, pingEveryMs);
 
   ws.on("message", (raw) => {
     device.lastSeen = Date.now();
