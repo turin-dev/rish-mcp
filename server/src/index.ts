@@ -14,7 +14,7 @@ import { OAuthProvider } from "./oauth.js";
 // ---------------------------------------------------------------------------
 const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
-const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the phone presents
+const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
 const MAX_TIMEOUT_MS = Number(process.env.MAX_TIMEOUT_MS ?? 600_000);
 // External base URL, used in OAuth metadata/redirects (claude.ai connectors).
@@ -36,24 +36,24 @@ function requireEnv(name: string): string {
 // ---------------------------------------------------------------------------
 function buildMcpServer(): McpServer {
   const server = new McpServer(
-    { name: "rish-mcp", version: "0.2.0" },
+    { name: "rish-mcp", version: "0.4.0" },
     { capabilities: { tools: {} } },
   );
 
   server.registerTool(
     "run_shell",
     {
-      title: "Run a shell command on the phone",
+      title: "Run a shell command on an Android device",
       description:
-        "Executes a shell command on the connected Android phone with Shizuku " +
+        "Executes a shell command on a connected Android phone, tablet, or Wear OS watch with Shizuku " +
         "shell privileges (uid 2000), like an adb shell. Returns stdout, stderr " +
-        "and the exit code. Use list_devices first if unsure which phone is online.",
+        "and the exit code. Use list_devices first if unsure which device is online.",
       inputSchema: {
         cmd: z.string().min(1).describe("The shell command line to run, e.g. 'getprop ro.product.model'"),
         deviceId: z
           .string()
           .optional()
-          .describe("Target device id; optional when exactly one phone is connected"),
+          .describe("Target device id; optional when exactly one Android device is connected"),
         timeoutMs: z
           .number()
           .int()
@@ -84,14 +84,15 @@ function buildMcpServer(): McpServer {
   server.registerTool(
     "list_devices",
     {
-      title: "List connected phones",
-      description: "Lists Android phones currently connected to the relay and ready to run commands.",
+      title: "List connected Android devices",
+      description: "Lists Android phones, tablets, and Wear OS watches currently connected to the relay and ready to run commands.",
       inputSchema: {},
     },
     async () => {
       const devices = registry.list().map((d) => ({
         id: d.id,
         name: d.name,
+        kind: d.kind,
         sdk: d.sdk,
         connectedForMs: Date.now() - d.connectedAt,
         pending: d.pending.size,
@@ -118,7 +119,7 @@ app.get("/healthz", (_req, res) => {
   res.json({ ok: true, devices: registry.list().length });
 });
 
-// OTA: serve the agent APK so a phone can self-update via curl (no sshd needed).
+// OTA: serve the agent APK so a device can self-update via curl (no sshd needed).
 // Token-gated with the device token; path is mounted read-only into the container.
 const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
 app.get("/agent.apk", (req: Request, res: Response) => {
@@ -182,7 +183,7 @@ app.get("/mcp", methodNotAllowed);
 app.delete("/mcp", methodNotAllowed);
 
 // ---------------------------------------------------------------------------
-// WS relay: the phone connects here (outbound) and stays connected.
+// WS relay: the Android device connects here (outbound) and stays connected.
 // ---------------------------------------------------------------------------
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -201,26 +202,28 @@ httpServer.on("upgrade", (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     const deviceId = url.searchParams.get("deviceId") || randomUUID();
-    const name = url.searchParams.get("name") || "phone";
+    const name = url.searchParams.get("name") || "Android";
     const sdk = url.searchParams.get("sdk") || "?";
-    registerAgent(ws, deviceId, name, sdk);
+    const kind = url.searchParams.get("kind") || "android";
+    registerAgent(ws, deviceId, name, sdk, kind);
   });
 });
 
-function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string) {
+function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string, kind: string) {
   const device: Device = {
     id: deviceId,
     name,
     sdk,
+    kind,
     ws,
     connectedAt: Date.now(),
     lastSeen: Date.now(),
     pending: new Map(),
   };
   registry.add(device);
-  console.log(`[agent] connected: ${deviceId} (${name}, sdk ${sdk})`);
+  console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk})`);
 
-  // Keepalive: the relay pings; the phone keeps the outbound socket warm.
+  // Keepalive: the relay pings; the Android device keeps the outbound socket warm.
   const ping = setInterval(() => {
     if (ws.readyState === ws.OPEN) ws.ping();
   }, 25_000);
@@ -256,5 +259,5 @@ httpServer.listen(PORT, () => {
   console.log(`rish-mcp server listening on :${PORT}`);
   console.log(`  MCP (AI):   POST /mcp        (Bearer AI_TOKEN or OAuth access token)`);
   console.log(`  OAuth:      ${PUBLIC_URL}/oauth/authorize (claude.ai connectors)`);
-  console.log(`  Relay (phone): WS  /agent?token=DEVICE_TOKEN&deviceId=...`);
+  console.log(`  Relay:      WS  /agent?token=DEVICE_TOKEN&deviceId=...&kind=android|watch`);
 });
