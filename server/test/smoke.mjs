@@ -1,7 +1,8 @@
 // End-to-end smoke test: fake Android agent + MCP client through the real server.
 import { spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -11,7 +12,11 @@ const AI_TOKEN = "ai-test-token";
 const DEVICE_TOKEN = "device-test-token";
 const base = `http://127.0.0.1:${PORT}`;
 
-const env = { ...process.env, PORT: String(PORT), AI_TOKEN, DEVICE_TOKEN, PUBLIC_URL: base };
+// Point the relay at the APK the repo actually builds when one is present, so
+// the version endpoint is exercised against a real binary rather than a stub.
+const APK_PATH = fileURLToPath(new URL("../../app/rish-mcp-agent.apk", import.meta.url));
+const hasApk = existsSync(APK_PATH);
+const env = { ...process.env, PORT: String(PORT), AI_TOKEN, DEVICE_TOKEN, PUBLIC_URL: base, APK_PATH };
 const srv = spawn("node", ["dist/index.js"], { env, stdio: "inherit" });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -22,18 +27,30 @@ try {
   await sleep(800);
 
   // Fake watch: connect to relay, actually run commands in the local shell as a stand-in for Shizuku.
-  // The relay's idea of "latest" must track the APK the repo actually builds,
-  // otherwise every device is silently reported as up to date (or as outdated).
-  const health = await (await fetch(`${base}/healthz`)).json();
+  // The relay reads "latest" out of the APK it serves. Cross-check the parsed
+  // result against build.gradle.kts, which is what the APK was built from —
+  // a silently wrong parse would otherwise mark every device as up to date.
   const gradle = readFileSync(new URL("../../app/app/build.gradle.kts", import.meta.url), "utf8");
   const gradleCode = Number(gradle.match(/versionCode\s*=\s*(\d+)/)[1]);
   const gradleName = gradle.match(/versionName\s*=\s*"([^"]+)"/)[1];
-  assert(health.agent.latestVersionCode === gradleCode,
-    `relay latest versionCode (${health.agent.latestVersionCode}) matches the app build (${gradleCode})`);
-  assert(health.agent.latestVersion === gradleName,
-    `relay latest versionName (${health.agent.latestVersion}) matches the app build (${gradleName})`);
 
-  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch&ver=${gradleName}&vc=${gradleCode}`);
+  const rel = await (await fetch(`${base}/api/version/release`)).json();
+  if (hasApk) {
+    assert(rel.source === "apk", "release version is read from the served APK");
+    assert(rel.versionCode === gradleCode && rel.versionName === gradleName,
+      `APK parser reads ${rel.versionName}/${rel.versionCode} matching build.gradle.kts (${gradleName}/${gradleCode})`);
+    assert(/^[0-9a-f]{64}$/.test(rel.sha256), "release endpoint publishes a sha256");
+    assert(rel.sizeBytes > 0, "release endpoint publishes the APK size");
+  } else {
+    console.log("skip - no built APK; version endpoint falls back to its constant");
+    assert(rel.source === "fallback", "release version falls back when no APK is mounted");
+  }
+
+  const health = await (await fetch(`${base}/healthz`)).json();
+  assert(health.agent.latestVersionCode === rel.versionCode,
+    "healthz agrees with the release endpoint");
+
+  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch&ver=${rel.versionName}&vc=${rel.versionCode}`);
   await new Promise((res, rej) => { agent.once("open", res); agent.once("error", rej); });
   agent.on("message", (raw) => {
     const m = JSON.parse(raw.toString());
@@ -61,7 +78,7 @@ try {
   assert(dev.content[0].text.includes("test-watch"), "list_devices shows the fake watch");
   assert(dev.content[0].text.includes('"kind": "watch"'), "list_devices exposes watch form factor");
   const cur = JSON.parse(dev.content[0].text)[0];
-  assert(cur.agentVersion === gradleName && cur.agentVersionCode === gradleCode,
+  assert(cur.agentVersion === rel.versionName && cur.agentVersionCode === rel.versionCode,
     "list_devices reports the agent version");
   assert(cur.updateAvailable === false, "a current agent is not flagged for update");
 

@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registry, normalizeKind, type Device, type DeviceKind } from "./relay.js";
 import { OAuthProvider } from "./oauth.js";
+import { readApkInfo, type ApkInfo } from "./apkinfo.js";
 
 // ---------------------------------------------------------------------------
 // Config (all via env; see .env.example)
@@ -15,18 +16,43 @@ import { OAuthProvider } from "./oauth.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
 const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
-// The agent build released alongside this server. Devices reporting an older
-// versionCode are flagged as outdated so the operator knows to push the APK the
-// relay already serves at /agent.apk. Override only when the deployed APK is
-// intentionally ahead of or behind this server build.
-const LATEST_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
-const LATEST_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);
+// The APK this relay hands out, and therefore what "latest" means to it.
+const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
+// Fallback for when no APK is mounted; also the explicit override.
+const FALLBACK_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
+const FALLBACK_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
 const MAX_TIMEOUT_MS = Number(process.env.MAX_TIMEOUT_MS ?? 600_000);
 // External base URL, used in OAuth metadata/redirects (claude.ai connectors).
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 
 const oauth = new OAuthProvider({ publicUrl: PUBLIC_URL, aiToken: AI_TOKEN });
+
+/**
+ * What the relay currently ships. Read from the APK on every call (cached on
+ * size+mtime inside readApkInfo), so dropping a new build into the mounted path
+ * is enough — no redeploy, no constant to bump. An explicit env override wins,
+ * and a missing/unreadable APK falls back to the compiled-in value rather than
+ * reporting every device as up to date.
+ */
+let apkWarning = "";
+function latestAgent(): { version: string; versionCode: number; source: string; apk?: ApkInfo } {
+  if (process.env.LATEST_AGENT_VERSION_CODE || process.env.LATEST_AGENT_VERSION) {
+    return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "env" };
+  }
+  try {
+    const apk = readApkInfo(APK_PATH);
+    apkWarning = "";
+    return { version: apk.versionName, versionCode: apk.versionCode, source: "apk", apk };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg !== apkWarning) {
+      apkWarning = msg;
+      console.warn(`[version] cannot read ${APK_PATH} (${msg}); falling back to ${FALLBACK_AGENT_VERSION}`);
+    }
+    return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "fallback" };
+  }
+}
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -99,6 +125,7 @@ function buildMcpServer(): McpServer {
       inputSchema: {},
     },
     async () => {
+      const latest = latestAgent();
       const devices = registry.list().map((d) => ({
         id: d.id,
         name: d.name,
@@ -106,8 +133,8 @@ function buildMcpServer(): McpServer {
         sdk: d.sdk,
         agentVersion: d.agentVersion,
         agentVersionCode: d.agentVersionCode,
-        latestAgentVersion: LATEST_AGENT_VERSION,
-        updateAvailable: d.agentVersionCode < LATEST_AGENT_VERSION_CODE,
+        latestAgentVersion: latest.version,
+        updateAvailable: d.agentVersionCode < latest.versionCode,
         connectedForMs: Date.now() - d.connectedAt,
         pending: d.pending.size,
       }));
@@ -130,17 +157,34 @@ app.use(express.urlencoded({ extended: false })); // OAuth form + token endpoint
 app.use(oauth.router());
 
 app.get("/healthz", (_req, res) => {
+  const latest = latestAgent();
   res.json({
     ok: true,
     devices: registry.list().length,
     // Lets an agent (or a shell one-liner) check for a newer build without MCP.
-    agent: { latestVersion: LATEST_AGENT_VERSION, latestVersionCode: LATEST_AGENT_VERSION_CODE },
+    agent: { latestVersion: latest.version, latestVersionCode: latest.versionCode },
+  });
+});
+
+// Current release of the agent, read live from the APK this relay serves.
+// Unauthenticated on purpose: a device has to be able to ask "is there a newer
+// build?" before it has done anything else. The download itself still needs the
+// device token. sha256 lets a client verify what it downloaded.
+app.get("/api/version/release", (_req, res) => {
+  const latest = latestAgent();
+  res.json({
+    versionName: latest.version,
+    versionCode: latest.versionCode,
+    source: latest.source,
+    sizeBytes: latest.apk?.sizeBytes ?? null,
+    sha256: latest.apk?.sha256 ?? null,
+    modifiedAt: latest.apk?.modifiedAt ?? null,
+    download: "/agent.apk?t=<DEVICE_TOKEN>",
   });
 });
 
 // OTA: serve the agent APK so a device can self-update via curl (no sshd needed).
 // Token-gated with the device token; path is mounted read-only into the container.
-const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
 app.get("/agent.apk", (req: Request, res: Response) => {
   if ((req.query.t ?? "") !== DEVICE_TOKEN) {
     res.status(401).type("text/plain").send("unauthorized");
@@ -254,10 +298,11 @@ function registerAgent(
   };
   registry.add(device);
   console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk}, agent ${agentVersion})`);
-  if (agentVersionCode < LATEST_AGENT_VERSION_CODE) {
+  const latest = latestAgent();
+  if (agentVersionCode < latest.versionCode) {
     console.warn(
       `[agent] outdated: ${deviceId} runs ${agentVersion} (code ${agentVersionCode}); ` +
-        `latest is ${LATEST_AGENT_VERSION} (code ${LATEST_AGENT_VERSION_CODE})`,
+        `latest is ${latest.version} (code ${latest.versionCode})`,
     );
   }
 

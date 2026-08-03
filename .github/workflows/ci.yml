@@ -82,6 +82,24 @@ jobs:
         run: |
           sha256sum app/rish-mcp-agent.apk | tee app/rish-mcp-agent.apk.sha256
 
+      # The `server` job runs without an APK, so it only covers the fallback
+      # path. Re-run the suite here, where a real APK exists, to exercise the
+      # binary-manifest parser behind /api/version/release against a genuine
+      # build — a silently wrong parse would report every device as up to date.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Smoke test against the built APK
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+          node test/smoke.mjs
+
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:

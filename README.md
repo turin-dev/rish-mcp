@@ -127,7 +127,8 @@ Then the AI has two tools:
 
 - `list_devices()` — Android devices currently connected to the relay, with each
   device's agent version and an `updateAvailable` flag when it is older than the
-  APK the relay serves
+  APK the relay serves (`GET /api/version/release` reports that version, parsed
+  live from the APK itself)
 - `run_shell({cmd, deviceId?, timeoutMs?})` — run a command as shell uid;
   returns stdout, stderr and the exit code. `deviceId` is optional when
   exactly one device is online.

@@ -205,17 +205,39 @@ relay compares it against the build it ships. `list_devices()` marks anything ol
 with `updateAvailable: true`, and the relay logs a warning on connect. Nothing updates
 itself — the install above is always a deliberate action.
 
-The relay's own idea of "latest" is published unauthenticated:
+**Where "latest" comes from.** The relay parses the APK it serves at `APK_PATH` and
+reports whatever is actually there — versions are not hardcoded, so replacing the
+mounted APK is enough. There is nothing to bump and nothing to redeploy:
+
+```bash
+curl -s https://mcp.example.com/api/version/release
+# {"versionName":"0.5.0","versionCode":5,"source":"apk",
+#  "sizeBytes":5020238,"sha256":"06732f83…","modifiedAt":"2026-08-03T12:40:00.466Z",
+#  "download":"/agent.apk?t=<DEVICE_TOKEN>"}
+```
+
+Unauthenticated on purpose — a device has to be able to ask "is there a newer build?"
+before doing anything else. The download itself still needs `DEVICE_TOKEN`, and the
+published `sha256` lets a client verify what it got. The result is cached on the
+file's size and mtime, so this is cheap to poll.
+
+`source` tells you where the answer came from:
+
+| `source` | Meaning |
+|---|---|
+| `apk` | parsed from the served APK — the normal case |
+| `env` | `LATEST_AGENT_VERSION` / `LATEST_AGENT_VERSION_CODE` are set and win |
+| `fallback` | no readable APK at `APK_PATH`; the compiled-in value is being used, and the relay logs why |
+
+A `fallback` here means version reporting is not trustworthy — check that the APK is
+actually mounted.
+
+`/healthz` carries the same numbers:
 
 ```bash
 curl -s https://mcp.example.com/healthz
 # {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
 ```
-
-That value comes from the server build. If you deploy an APK that is deliberately
-ahead of or behind the server, override it with the `LATEST_AGENT_VERSION` and
-`LATEST_AGENT_VERSION_CODE` env vars — otherwise every device is reported as up to
-date (or as outdated) regardless of what it actually runs.
 
 The APK must be signed with the same key as the installed one, or `pm install -r`
 fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Test APKs from pull-request CI use a
@@ -342,8 +364,8 @@ No arguments. Returns a JSON array of connected devices:
 - `kind` — `android` (phone/tablet) or `watch` (Wear OS).
 - `agentVersion` / `agentVersionCode` — the APK running on that device.
   Agents installed before version reporting existed report `"unknown"` / `0`.
-- `updateAvailable` — that device runs an older agent than the relay serves at
-  `/agent.apk`. See [§ 3.6](#36-ota-self-update).
+- `updateAvailable` — that device runs an older agent than the APK the relay
+  currently serves, read live from that file. See [§ 3.6](#36-ota-self-update).
 - `pending` — commands currently in flight to that device.
 
 Call this first if you're unsure which device is online.
@@ -561,5 +583,5 @@ socket and fails its in-flight commands with `device reconnected`.
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
 | `APK_PATH` | | `/srv/agent.apk` | Path the OTA endpoint serves |
-| `LATEST_AGENT_VERSION` | | the server build's agent version | Version name devices are compared against for `updateAvailable` |
-| `LATEST_AGENT_VERSION_CODE` | | the server build's agent versionCode | Version code devices are compared against for `updateAvailable` |
+| `LATEST_AGENT_VERSION` | | read from the APK at `APK_PATH` | Overrides the version name devices are compared against for `updateAvailable` |
+| `LATEST_AGENT_VERSION_CODE` | | read from the APK at `APK_PATH` | Overrides the version code devices are compared against for `updateAvailable` |
