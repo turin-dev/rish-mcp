@@ -6,7 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { registry, type Device } from "./relay.js";
+import { registry, normalizeKind, type Device, type DeviceKind } from "./relay.js";
 import { OAuthProvider } from "./oauth.js";
 
 // ---------------------------------------------------------------------------
@@ -204,12 +204,12 @@ httpServer.on("upgrade", (req, socket, head) => {
     const deviceId = url.searchParams.get("deviceId") || randomUUID();
     const name = url.searchParams.get("name") || "Android";
     const sdk = url.searchParams.get("sdk") || "?";
-    const kind = url.searchParams.get("kind") || "android";
+    const kind = normalizeKind(url.searchParams.get("kind"));
     registerAgent(ws, deviceId, name, sdk, kind);
   });
 });
 
-function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string, kind: string) {
+function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string, kind: DeviceKind) {
   const device: Device = {
     id: deviceId,
     name,
@@ -223,12 +223,25 @@ function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: strin
   registry.add(device);
   console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk})`);
 
-  // Wear OS keeps the radio asleep longer: the watch disables client pings and
-  // relies on this lower-frequency relay keepalive. Handheld behavior stays as-is.
+  // Keepalive. Wear OS pings less often to keep the radio asleep. A pong (or any
+  // frame) refreshes lastSeen; if a device misses ~2.5 ping cycles the socket is
+  // half-open — TCP alone can sit on that for many minutes, so terminate it and
+  // let the agent redial rather than leaving a zombie in the registry.
   const pingEveryMs = kind === "watch" ? 60_000 : 25_000;
+  const staleAfterMs = pingEveryMs * 2.5;
   const ping = setInterval(() => {
-    if (ws.readyState === ws.OPEN) ws.ping();
+    if (ws.readyState !== ws.OPEN) return;
+    if (Date.now() - device.lastSeen > staleAfterMs) {
+      console.warn(`[agent] stale, terminating: ${deviceId} (no traffic for ${staleAfterMs}ms)`);
+      ws.terminate();
+      return;
+    }
+    ws.ping();
   }, pingEveryMs);
+
+  ws.on("pong", () => {
+    device.lastSeen = Date.now();
+  });
 
   ws.on("message", (raw) => {
     device.lastSeen = Date.now();

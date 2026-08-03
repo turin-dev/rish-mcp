@@ -15,11 +15,18 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/** Form factor an agent may claim. Anything else is coerced to "android". */
+export type DeviceKind = "android" | "watch";
+
+export function normalizeKind(raw: string | null | undefined): DeviceKind {
+  return raw === "watch" ? "watch" : "android";
+}
+
 export interface Device {
   id: string;
   name: string;
   sdk: string;
-  kind: string;
+  kind: DeviceKind;
   ws: WebSocket;
   connectedAt: number;
   lastSeen: number;
