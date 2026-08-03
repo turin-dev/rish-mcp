@@ -224,10 +224,22 @@ try {
   try {
     await sleep(600);
 
-    const pubRel = await (await fetch(`${pubBase}/api/version/release`)).json();
-    assert(pubRel.versionCode === rel.versionCode && pubRel.versionName === rel.versionName,
-      "public endpoint reports the same release as the relay");
-    assert(pubRel.download === "/agent.apk", "public release advertises a tokenless download");
+    // With no APK there is nothing to publish, so the public service reports
+    // unavailable rather than inventing a version the way the relay's fallback does.
+    const pubRes = await fetch(`${pubBase}/api/version/release`);
+    const pubRel = await pubRes.json();
+    if (hasApk) {
+      assert(pubRes.status === 200, "public release endpoint answers when an APK is mounted");
+      assert(pubRel.versionCode === rel.versionCode && pubRel.versionName === rel.versionName,
+        "public endpoint reports the same release as the relay");
+      assert(pubRel.download === "/agent.apk", "public release advertises a tokenless download");
+    } else {
+      assert(pubRes.status === 503, "public release endpoint is unavailable with no APK");
+      assert((await (await fetch(`${pubBase}/healthz`)).json()).ok === false,
+        "public healthz reports unhealthy with no APK");
+      assert((await fetch(`${pubBase}/agent.apk`)).status === 503,
+        "public APK download is unavailable with no APK");
+    }
 
     // The whole point of the split: the public host must not reach the relay.
     for (const path of ["/mcp", "/agent", "/.well-known/oauth-authorization-server"]) {
