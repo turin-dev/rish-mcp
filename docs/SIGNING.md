@@ -69,4 +69,8 @@ Official artifacts are retained for 90 days.
 
 ## Development builds
 
-PRs, `agent/**` pushes, and manual workflow runs outside `master` / `main` create a test artifact named `rish-mcp-test-<commit-sha>`. Those builds use a disposable CI signing key and must not be used as an update path for official installations.
+Pull requests and manual workflow runs outside `master` / `main` create a test artifact named `rish-mcp-test-<commit-sha>`. Those builds use a disposable CI signing key and must not be used as an update path for official installations.
+
+Development branches are built through their pull request rather than on push, so a
+branch with no open PR does not run CI. Use **Actions → CI → Run workflow** if you need
+a build before opening one.

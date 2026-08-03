@@ -1,11 +1,13 @@
 name: CI
 
 on:
+  # Development branches are covered by their pull request. Adding them here too
+  # would run the (slow) Android build twice per commit — push and pull_request
+  # produce different github.ref values, so concurrency cannot dedupe them.
   push:
     branches:
       - master
       - main
-      - "agent/**"
   pull_request:
     branches:
       - master

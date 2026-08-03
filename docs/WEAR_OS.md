@@ -7,13 +7,17 @@ There is no separate watch build or package name.
 
 The agent detects `android.hardware.type.watch` at runtime and switches to a watch-friendly profile:
 
-- round displays use `res/layout-round/activity_main.xml` with larger safe margins and stacked controls;
+- watches use `res/layout-watch/activity_main.xml` with larger safe margins and stacked controls (the `watch` UI-mode qualifier, so square watches get it too);
 - new device IDs use `watch-xxxxxxxx` instead of the handheld `android-xxxxxxxx` prefix;
 - the relay receives `kind=watch`, and `list_devices()` exposes that form factor;
-- the watch does not send its own OkHttp WebSocket pings;
-- the relay pings watch connections every 60 seconds instead of every 25 seconds;
+- the WebSocket ping interval is relaxed from 20 to 60 seconds on both ends (the relay pings watch connections every 60 seconds instead of every 25);
 - the local Shizuku/reconnect heartbeat is relaxed from 30 seconds to 90 seconds;
 - Bluetooth/companion-network connectivity is shown as `phone/bluetooth` when Android exposes that transport.
+
+Pings are stretched, never switched off. The client's ping timeout is what surfaces a
+half-open socket, and the relay drops any connection that misses ~2.5 ping cycles — a
+watch that loses its network is reconnected rather than silently sitting in the
+registry as a device that no longer answers.
 
 Existing installs keep their already-generated device ID when upgraded.
 
