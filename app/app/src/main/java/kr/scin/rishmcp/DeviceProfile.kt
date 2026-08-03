@@ -13,7 +13,11 @@ object DeviceProfile {
 
     fun idPrefix(ctx: Context): String = if (isWatch(ctx)) "watch" else "android"
 
-    fun webSocketPingSeconds(ctx: Context): Long = if (isWatch(ctx)) 90L else 20L
+    /**
+     * Watches rely on the relay's lower-frequency server ping instead of also
+     * sending their own OkHttp pings. OkHttp treats 0 as "disabled".
+     */
+    fun webSocketPingSeconds(ctx: Context): Long = if (isWatch(ctx)) 0L else 20L
 
     fun heartbeatMs(ctx: Context): Long = if (isWatch(ctx)) 90_000L else 30_000L
 
