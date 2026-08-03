@@ -1,7 +1,10 @@
 // End-to-end smoke test: fake Android agent + MCP client through the real server.
 import { spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -264,6 +267,67 @@ try {
     }
   } finally {
     pub.kill("SIGTERM");
+  }
+
+  // --- release fetched from GitHub (fake API, so CI stays offline) ---
+  if (hasApk) {
+    const apkBytes = readFileSync(APK_PATH);
+    const TAG = "v9.9.9";
+    let apiHits = 0;
+    const gh = createServer((req, res) => {
+      if (req.url.endsWith("/releases/latest")) {
+        apiHits++;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({
+          tag_name: TAG,
+          assets: [{ name: `rish-mcp-agent-${TAG}.apk`, browser_download_url: `http://127.0.0.1:${GH_PORT}/dl` }],
+        }));
+      } else if (req.url === "/dl") {
+        res.setHeader("content-type", "application/vnd.android.package-archive");
+        res.end(apkBytes);
+      } else {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    const GH_PORT = 8096;
+    await new Promise((r) => gh.listen(GH_PORT, "127.0.0.1", r));
+    const cacheDir = mkdtempSync(join(tmpdir(), "rish-release-"));
+    const FETCH_PORT = 8095;
+    const fetchEnv = {
+      ...process.env, PORT: String(FETCH_PORT), APK_PATH: "",
+      GITHUB_API_BASE: `http://127.0.0.1:${GH_PORT}`, RELEASE_CACHE_DIR: cacheDir,
+    };
+    delete fetchEnv.APK_PATH; // no local override: force the GitHub path
+
+    let fetcher = spawn("node", ["dist/public.js"], { env: fetchEnv, stdio: "inherit" });
+    const fetchBase = `http://127.0.0.1:${FETCH_PORT}`;
+    try {
+      await sleep(1200);
+      const fr = await (await fetch(`${fetchBase}/api/version/release`)).json();
+      assert(fr.tag === TAG, `release is fetched from GitHub (tag ${fr.tag})`);
+      assert(fr.versionName === gradleName, "fetched release reports the APK's own version");
+      assert(fr.sha256 === createHash("sha256").update(apkBytes).digest("hex"),
+        "fetched release sha256 matches the served bytes");
+      assert(existsSync(join(cacheDir, "agent.apk")), "fetched APK is cached on disk");
+
+      const dl = Buffer.from(await (await fetch(`${fetchBase}/agent.apk`)).arrayBuffer());
+      assert(dl.equals(apkBytes), "download serves the fetched bytes byte-for-byte");
+
+      // Restart with GitHub unreachable: the cache has to carry it.
+      fetcher.kill("SIGTERM");
+      await sleep(300);
+      await new Promise((r) => gh.close(r));
+      fetcher = spawn("node", ["dist/public.js"], { env: fetchEnv, stdio: "inherit" });
+      await sleep(1200);
+      const cached = await (await fetch(`${fetchBase}/api/version/release`)).json();
+      assert(cached.tag === TAG && cached.versionName === gradleName,
+        "cached release still served when GitHub is unreachable");
+      assert(apiHits >= 1, "GitHub API was actually queried");
+    } finally {
+      fetcher.kill("SIGTERM");
+      try { gh.close(); } catch { /* already closed */ }
+    }
   }
 } catch (e) {
   console.error("THREW:", e);

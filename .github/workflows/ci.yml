@@ -8,6 +8,9 @@ on:
     branches:
       - master
       - main
+    # A v* tag is what publishes a GitHub release; see the release job below.
+    tags:
+      - "v*"
   pull_request:
     branches:
       - master
@@ -53,7 +56,7 @@ jobs:
 
   android-check:
     name: Android + Wear OS test APK
-    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')) }}
+    if: ${{ github.event_name != 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -112,10 +115,13 @@ jobs:
 
   official-apk:
     name: Official signed Android + Wear OS APK
-    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'push' }}
     needs: server
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      # Needed only by the release step below, which runs on v* tags.
+      contents: write
 
     steps:
       - name: Checkout
@@ -182,6 +188,36 @@ jobs:
             app/rish-mcp-agent.apk.sha256
           if-no-files-found: error
           retention-days: 90
+
+      # A tag is the publish signal. The APK's own versionName has to agree with
+      # it, or the release would advertise a version the binary does not carry —
+      # and that is exactly what the servers key their update checks on.
+      - name: Check the tag matches the APK version
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          apk=$(docker run --rm -v "$PWD/app":/work rishmcp-android-build \
+            /opt/android-sdk/build-tools/35.0.0/aapt2 dump badging /work/rish-mcp-agent.apk \
+            | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          echo "tag=$tag apk=$apk"
+          if [ "$tag" != "$apk" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match APK versionName $apk"
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp app/rish-mcp-agent.apk "app/rish-mcp-agent-${GITHUB_REF_NAME}.apk"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "rish-mcp $GITHUB_REF_NAME" \
+            --generate-notes \
+            "app/rish-mcp-agent-${GITHUB_REF_NAME}.apk" \
+            "app/rish-mcp-agent.apk.sha256"
 
       - name: Remove signing material
         if: ${{ always() }}

@@ -52,6 +52,20 @@ base64 < release.keystore | tr -d '\n'
 
 Copy the single-line output into `ANDROID_KEYSTORE_BASE64`.
 
+## Publishing a release
+
+Pushing a `v*` tag builds the signed APK and publishes it as a GitHub release. The
+running servers poll for the newest release and pick it up on their own — there is no
+deploy step.
+
+```bash
+# versionName in app/app/build.gradle.kts must already say 0.5.0
+git tag v0.5.0 && git push --tags
+```
+
+CI fails the tag build if the tag and the APK's `versionName` disagree, so a release
+can never advertise a version its binary does not carry.
+
 ## What happens on `master` / `main`
 
 1. Server TypeScript build and end-to-end MCP smoke test run.

@@ -128,7 +128,18 @@ The phone side is one APK. It needs **Shizuku** running (the app that hands out
 `adb shell`-level access without root). Install and start Shizuku first — via
 wireless debugging, a computer, or root.
 
-### 3.1 Build the APK
+### 3.1 Get the APK
+
+Download the signed build from the newest release — either from GitHub or from your
+own public host, which serves the same bytes:
+
+```bash
+curl -sLO https://github.com/turin-dev/rish-mcp/releases/latest/download/rish-mcp-agent.apk
+curl -sO  https://dl.example.com/agent.apk        # same file, via your relay's public host
+```
+
+Or build it yourself (unsigned by the release key, so it cannot update an existing
+install):
 
 ```bash
 cd app && ./build-apk.sh        # runs the Android SDK + Gradle inside Docker
@@ -216,9 +227,9 @@ relay compares it against the build it ships. `list_devices()` marks anything ol
 with `updateAvailable: true`, and the relay logs a warning on connect. Nothing updates
 itself — the install above is always a deliberate action.
 
-**Where "latest" comes from.** The relay parses the APK it serves at `APK_PATH` and
-reports whatever is actually there — versions are not hardcoded, so replacing the
-mounted APK is enough. There is nothing to bump and nothing to redeploy:
+**Where "latest" comes from.** Both servers fetch the signed APK from the newest
+GitHub release, cache it, and parse the cached bytes — versions are not hardcoded
+anywhere. Publishing a release is the only step; nothing to bump, nothing to redeploy:
 
 ```bash
 curl -s https://mcp.example.com/api/version/release
@@ -236,12 +247,12 @@ file's size and mtime, so this is cheap to poll.
 
 | `source` | Meaning |
 |---|---|
-| `apk` | parsed from the served APK — the normal case |
+| `apk` | parsed from the fetched/cached release APK — the normal case |
 | `env` | `LATEST_AGENT_VERSION` / `LATEST_AGENT_VERSION_CODE` are set and win |
 | `fallback` | no readable APK at `APK_PATH`; the compiled-in value is being used, and the relay logs why |
 
-A `fallback` here means version reporting is not trustworthy — check that the APK is
-actually mounted.
+A `fallback` here means no release has been fetched and none is cached — version
+reporting is not trustworthy until one lands. The servers log why each attempt failed.
 
 `/healthz` carries the same numbers:
 
@@ -593,7 +604,11 @@ socket and fails its in-flight commands with `device reconnected`.
 | `PORT` | | `8080` | Internal listen port |
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
-| `APK_PATH` | | `/srv/agent.apk` | Path the OTA endpoint serves |
+| `APK_PATH` | | — | Serve this local APK instead of fetching a release. Dev/test escape hatch; disables GitHub polling |
+| `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose latest release supplies the APK |
+| `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |
+| `RELEASE_POLL_MS` | | `900000` | How often to check GitHub for a newer release |
+| `GITHUB_API_BASE` | | `https://api.github.com` | Overridable for testing |
 | `PUBLIC_MCP_HOST` | compose | — | Public hostname for the release/APK container |
 | `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on the public, tokenless APK download |
 | `LATEST_AGENT_VERSION` | | read from the APK at `APK_PATH` | Overrides the version name devices are compared against for `updateAvailable` |

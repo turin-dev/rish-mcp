@@ -5,6 +5,10 @@
 #                    WebSocket (/agent), both token-gated. Shell access lives here.
 #   PUBLIC_MCP_HOST  public  — release metadata and the agent APK. No secrets, no
 #                    device information, no route to the relay.
+#
+# Neither mounts a locally built APK. Both fetch the signed APK from the GitHub
+# release CI publishes on a v* tag and cache it in a named volume, so a fresh
+# deploy needs nothing on disk beyond this file.
 services:
   rish-mcp:
     build:
@@ -17,10 +21,10 @@ services:
       DEVICE_TOKEN: "${DEVICE_TOKEN}"
       DEFAULT_TIMEOUT_MS: "60000"
       MAX_TIMEOUT_MS: "600000"
-      APK_PATH: "/srv/agent.apk"
+      GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
+      RELEASE_CACHE_DIR: "/var/cache/rish-mcp"
     volumes:
-      # OTA: expose the latest built APK (read-only) at GET /agent.apk?t=DEVICE_TOKEN
-      - ./app/rish-mcp-agent.apk:/srv/agent.apk:ro
+      - relay-release:/var/cache/rish-mcp
     labels:
       - traefik.enable=true
       - traefik.http.routers.rishmcp.rule=Host(`${MCP_HOST}`)
@@ -39,10 +43,11 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      APK_PATH: "/srv/agent.apk"
+      GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
+      RELEASE_CACHE_DIR: "/var/cache/rish-mcp"
       DOWNLOADS_PER_HOUR: "30"
     volumes:
-      - ./app/rish-mcp-agent.apk:/srv/agent.apk:ro
+      - public-release:/var/cache/rish-mcp
     labels:
       - traefik.enable=true
       - traefik.http.routers.rishmcppublic.rule=Host(`${PUBLIC_MCP_HOST}`)
@@ -51,6 +56,10 @@ services:
       - traefik.http.services.rishmcppublic.loadbalancer.server.port=8080
     networks:
       - dokploy-network
+
+volumes:
+  relay-release:
+  public-release:
 
 networks:
   dokploy-network:

@@ -44,6 +44,9 @@ hostname has no route to the relay even if a proxy rule is wrong:
 | `MCP_HOST` (private) | `POST /mcp`, `WS /agent`, `/healthz`, OAuth | `AI_TOKEN` / `DEVICE_TOKEN` |
 | `PUBLIC_MCP_HOST` (public) | `GET /api/version/release`, `GET /agent.apk` | none — no secrets, no device info |
 
+Neither container ships an APK: both fetch the signed build from the newest GitHub
+release and cache it. Pushing a `v*` tag is the whole release process.
+
 Shell access lives entirely on the private host. The public one only answers
 "which agent build is current" and hands out that APK.
 

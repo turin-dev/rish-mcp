@@ -1,7 +1,5 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
@@ -9,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registry, normalizeKind, type Device, type DeviceKind } from "./relay.js";
 import { OAuthProvider } from "./oauth.js";
-import { readApkInfo, type ApkInfo } from "./apkinfo.js";
+import { ReleaseSource, releaseOptionsFromEnv, type Release } from "./release.js";
 
 // ---------------------------------------------------------------------------
 // Config (all via env; see .env.example)
@@ -17,10 +15,10 @@ import { readApkInfo, type ApkInfo } from "./apkinfo.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
 const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
-// The APK this relay hands out, and therefore what "latest" means to it.
-// Resolved: res.sendFile() rejects relative paths.
-const APK_PATH = resolve(process.env.APK_PATH ?? "/srv/agent.apk");
-// Fallback for when no APK is mounted; also the explicit override.
+// The APK this relay hands out, and therefore what "latest" means to it. Comes
+// from the GitHub release CI publishes (or APK_PATH locally); see release.ts.
+const releases = new ReleaseSource(releaseOptionsFromEnv());
+// Used only when no release has been fetched yet and none is cached.
 const FALLBACK_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
 const FALLBACK_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
@@ -31,29 +29,17 @@ const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 const oauth = new OAuthProvider({ publicUrl: PUBLIC_URL, aiToken: AI_TOKEN });
 
 /**
- * What the relay currently ships. Read from the APK on every call (cached on
- * size+mtime inside readApkInfo), so dropping a new build into the mounted path
- * is enough — no redeploy, no constant to bump. An explicit env override wins,
- * and a missing/unreadable APK falls back to the compiled-in value rather than
- * reporting every device as up to date.
+ * What the relay currently ships. An explicit env override wins; otherwise it is
+ * whatever release has been fetched or cached. With neither, fall back to the
+ * compiled-in value rather than reporting every device as up to date.
  */
-let apkWarning = "";
-function latestAgent(): { version: string; versionCode: number; source: string; apk?: ApkInfo } {
+function latestAgent(): { version: string; versionCode: number; source: string; release?: Release } {
   if (process.env.LATEST_AGENT_VERSION_CODE || process.env.LATEST_AGENT_VERSION) {
     return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "env" };
   }
-  try {
-    const apk = readApkInfo(APK_PATH);
-    apkWarning = "";
-    return { version: apk.versionName, versionCode: apk.versionCode, source: "apk", apk };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg !== apkWarning) {
-      apkWarning = msg;
-      console.warn(`[version] cannot read ${APK_PATH} (${msg}); falling back to ${FALLBACK_AGENT_VERSION}`);
-    }
-    return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "fallback" };
-  }
+  const r = releases.get();
+  if (r) return { version: r.versionName, versionCode: r.versionCode, source: "apk", release: r };
+  return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "fallback" };
 }
 
 function requireEnv(name: string): string {
@@ -178,9 +164,9 @@ app.get("/api/version/release", (_req, res) => {
     versionName: latest.version,
     versionCode: latest.versionCode,
     source: latest.source,
-    sizeBytes: latest.apk?.sizeBytes ?? null,
-    sha256: latest.apk?.sha256 ?? null,
-    modifiedAt: latest.apk?.modifiedAt ?? null,
+    sizeBytes: latest.release?.sizeBytes ?? null,
+    sha256: latest.release?.sha256 ?? null,
+    modifiedAt: latest.release?.modifiedAt ?? null,
     download: "/agent.apk?t=<DEVICE_TOKEN>",
   });
 });
@@ -192,13 +178,15 @@ app.get("/agent.apk", (req: Request, res: Response) => {
     res.status(401).type("text/plain").send("unauthorized");
     return;
   }
-  if (!existsSync(APK_PATH)) {
+  const r = releases.get();
+  if (!r) {
     res.status(404).type("text/plain").send("apk not available");
     return;
   }
   res.setHeader("Content-Type", "application/vnd.android.package-archive");
-  res.setHeader("Content-Length", String(statSync(APK_PATH).size));
-  res.sendFile(APK_PATH);
+  res.setHeader("Content-Length", String(r.sizeBytes));
+  res.setHeader("X-Apk-Sha256", r.sha256);
+  res.sendFile(r.path);
 });
 
 function checkAiAuth(req: Request, res: Response): boolean {
@@ -355,6 +343,7 @@ function registerAgent(
   ws.on("error", (e) => console.error(`[agent] ws error ${deviceId}:`, e.message));
 }
 
+releases.start();
 httpServer.listen(PORT, () => {
   console.log(`rish-mcp server listening on :${PORT}`);
   console.log(`  MCP (AI):   POST /mcp        (Bearer AI_TOKEN or OAuth access token)`);
