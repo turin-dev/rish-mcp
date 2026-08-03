@@ -1,4 +1,4 @@
-// End-to-end smoke test: fake phone agent + MCP client through the real server.
+// End-to-end smoke test: fake Android agent + MCP client through the real server.
 import { spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
@@ -20,8 +20,8 @@ const assert = (c, m) => { if (!c) { console.error("ASSERT FAIL:", m); failed = 
 try {
   await sleep(800);
 
-  // Fake phone: connect to relay, actually run commands in the local shell as a stand-in for rish.
-  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-phone&name=FakeS23&sdk=36`);
+  // Fake watch: connect to relay, actually run commands in the local shell as a stand-in for Shizuku.
+  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch`);
   await new Promise((res, rej) => { agent.once("open", res); agent.once("error", rej); });
   agent.on("message", (raw) => {
     const m = JSON.parse(raw.toString());
@@ -46,10 +46,11 @@ try {
   assert(tools.tools.some((t) => t.name === "list_devices"), "list_devices tool advertised");
 
   const dev = await client.callTool({ name: "list_devices", arguments: {} });
-  assert(dev.content[0].text.includes("test-phone"), "list_devices shows the fake phone");
+  assert(dev.content[0].text.includes("test-watch"), "list_devices shows the fake watch");
+  assert(dev.content[0].text.includes('"kind": "watch"'), "list_devices exposes watch form factor");
 
-  const ok = await client.callTool({ name: "run_shell", arguments: { cmd: "echo hello-from-phone" } });
-  assert(ok.content[0].text.includes("hello-from-phone"), "run_shell returns stdout");
+  const ok = await client.callTool({ name: "run_shell", arguments: { cmd: "echo hello-from-watch" } });
+  assert(ok.content[0].text.includes("hello-from-watch"), "run_shell returns stdout");
   assert(ok.content[0].text.includes("exit=0"), "run_shell reports exit=0");
 
   const bad = await client.callTool({ name: "run_shell", arguments: { cmd: "sh -c 'exit 7'" } });
