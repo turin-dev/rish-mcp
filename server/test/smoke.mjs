@@ -1,6 +1,7 @@
 // End-to-end smoke test: fake Android agent + MCP client through the real server.
 import { spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -21,7 +22,18 @@ try {
   await sleep(800);
 
   // Fake watch: connect to relay, actually run commands in the local shell as a stand-in for Shizuku.
-  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch`);
+  // The relay's idea of "latest" must track the APK the repo actually builds,
+  // otherwise every device is silently reported as up to date (or as outdated).
+  const health = await (await fetch(`${base}/healthz`)).json();
+  const gradle = readFileSync(new URL("../../app/app/build.gradle.kts", import.meta.url), "utf8");
+  const gradleCode = Number(gradle.match(/versionCode\s*=\s*(\d+)/)[1]);
+  const gradleName = gradle.match(/versionName\s*=\s*"([^"]+)"/)[1];
+  assert(health.agent.latestVersionCode === gradleCode,
+    `relay latest versionCode (${health.agent.latestVersionCode}) matches the app build (${gradleCode})`);
+  assert(health.agent.latestVersion === gradleName,
+    `relay latest versionName (${health.agent.latestVersion}) matches the app build (${gradleName})`);
+
+  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch&ver=${gradleName}&vc=${gradleCode}`);
   await new Promise((res, rej) => { agent.once("open", res); agent.once("error", rej); });
   agent.on("message", (raw) => {
     const m = JSON.parse(raw.toString());
@@ -48,6 +60,10 @@ try {
   const dev = await client.callTool({ name: "list_devices", arguments: {} });
   assert(dev.content[0].text.includes("test-watch"), "list_devices shows the fake watch");
   assert(dev.content[0].text.includes('"kind": "watch"'), "list_devices exposes watch form factor");
+  const cur = JSON.parse(dev.content[0].text)[0];
+  assert(cur.agentVersion === gradleName && cur.agentVersionCode === gradleCode,
+    "list_devices reports the agent version");
+  assert(cur.updateAvailable === false, "a current agent is not flagged for update");
 
   const ok = await client.callTool({ name: "run_shell", arguments: { cmd: "echo hello-from-watch" } });
   assert(ok.content[0].text.includes("hello-from-watch"), "run_shell returns stdout");
@@ -163,6 +179,12 @@ try {
   assert(both.length === 2, "list_devices shows both devices");
   assert(both.find((d) => d.id === "test-watch")?.kind === "watch", "watch keeps kind=watch");
   assert(both.find((d) => d.id === "test-phone")?.kind === "android", "unknown kind coerced to android");
+
+  // test-phone sent no ver/vc at all — an agent from before version reporting.
+  const old = both.find((d) => d.id === "test-phone");
+  assert(old.agentVersion === "unknown" && old.agentVersionCode === 0,
+    "agent that reports no version is recorded as unknown");
+  assert(old.updateAvailable === true, "agent predating version reporting is flagged for update");
 
   const ambiguous = await multi.callTool({ name: "run_shell", arguments: { cmd: "echo x" } });
   assert(ambiguous.isError === true && ambiguous.content[0].text.includes("deviceId"),

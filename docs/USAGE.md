@@ -111,7 +111,8 @@ configured resolver (Let's Encrypt in the sample labels).
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":0}   ← 0 until a phone connects (next section)
+# {"ok":true,"devices":0,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+#                    ↑ 0 until a phone connects (next section)
 ```
 
 If you get a TLS or 404 error, the proxy/DNS isn't routing yet — fix that before
@@ -172,18 +173,19 @@ URL + `DEVICE_TOKEN`, then **Save & Start**.
 
 ### 3.4 What the agent does
 
-- Holds one outbound `wss://…/agent?token=…&deviceId=…&name=…&sdk=…` connection.
+- Holds one outbound `wss://…/agent?token=…&deviceId=…&name=…&sdk=…&kind=…&ver=…&vc=…`
+  connection, reporting its form factor and APK version to the relay.
 - Runs as a **foreground service** (persistent notification) so Android won't kill
   it, and **auto-starts on boot** via `BootReceiver`.
 - A watchdog reconnects on network changes or if Shizuku drops.
-- The relay pings every 25 s to keep the socket warm; a reconnect with the same
-  `deviceId` transparently replaces the stale socket.
+- The relay pings every 25 s to keep the socket warm (60 s on Wear OS); a reconnect
+  with the same `deviceId` transparently replaces the stale socket.
 
 ### 3.5 Confirm it's connected
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1}   ← 1 means the phone's WebSocket is up
+# {"ok":true,"devices":1,...}   ← 1 means the phone's WebSocket is up
 ```
 
 Or ask any connected AI to call `list_devices` (see below).
@@ -197,6 +199,27 @@ can update itself over the same channel — no `adb`/`sshd`:
 rish -c 'curl -sfL "https://mcp.example.com/agent.apk?t=<DEVICE_TOKEN>" -o /data/local/tmp/r.apk \
   && pm install -r -g /data/local/tmp/r.apk && rm -f /data/local/tmp/r.apk'
 ```
+
+**Knowing when to update.** Each agent reports its version when it connects, and the
+relay compares it against the build it ships. `list_devices()` marks anything older
+with `updateAvailable: true`, and the relay logs a warning on connect. Nothing updates
+itself — the install above is always a deliberate action.
+
+The relay's own idea of "latest" is published unauthenticated:
+
+```bash
+curl -s https://mcp.example.com/healthz
+# {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+```
+
+That value comes from the server build. If you deploy an APK that is deliberately
+ahead of or behind the server, override it with the `LATEST_AGENT_VERSION` and
+`LATEST_AGENT_VERSION_CODE` env vars — otherwise every device is reported as up to
+date (or as outdated) regardless of what it actually runs.
+
+The APK must be signed with the same key as the installed one, or `pm install -r`
+fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Test APKs from pull-request CI use a
+disposable key and cannot update an official install — see [SIGNING.md](SIGNING.md).
 
 ---
 
@@ -303,20 +326,27 @@ The server advertises exactly two tools.
 
 ### `list_devices()`
 
-No arguments. Returns a JSON array of connected phones:
+No arguments. Returns a JSON array of connected devices:
 
 ```json
 [
-  { "id": "s23-1a2b3c4d", "name": "phone", "sdk": "36",
+  { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android", "sdk": "36",
+    "agentVersion": "0.5.0", "agentVersionCode": 5,
+    "latestAgentVersion": "0.5.0", "updateAvailable": false,
     "connectedForMs": 84213, "pending": 0 }
 ]
 ```
 
-- `id` — device id; pass it to `run_shell` as `deviceId` when more than one phone
+- `id` — device id; pass it to `run_shell` as `deviceId` when more than one device
   is connected.
+- `kind` — `android` (phone/tablet) or `watch` (Wear OS).
+- `agentVersion` / `agentVersionCode` — the APK running on that device.
+  Agents installed before version reporting existed report `"unknown"` / `0`.
+- `updateAvailable` — that device runs an older agent than the relay serves at
+  `/agent.apk`. See [§ 3.6](#36-ota-self-update).
 - `pending` — commands currently in flight to that device.
 
-Call this first if you're unsure which phone is online.
+Call this first if you're unsure which device is online.
 
 ### `run_shell({ cmd, deviceId?, timeoutMs? })`
 
@@ -510,9 +540,14 @@ The phone↔relay messages are newline-free JSON frames over the WebSocket.
 ```
 
 Connection query params on `GET /agent`: `token` (required, = `DEVICE_TOKEN`),
-`deviceId` (optional; server assigns a UUID if absent), `name`, `sdk`. The relay
-pings every 25 s; a reconnect with an existing `deviceId` replaces the old socket
-and fails its in-flight commands with `device reconnected`.
+`deviceId` (optional; server assigns a UUID if absent), `name`, `sdk`, `kind`
+(`android` or `watch`; anything else is coerced to `android`), `ver` (agent
+versionName) and `vc` (agent versionCode). All but `token` are optional — an agent
+that omits `ver`/`vc` is recorded as version `unknown` and flagged as outdated.
+
+The relay pings every 25 s (60 s for `kind=watch`) and terminates a connection that
+misses ~2.5 ping cycles. A reconnect with an existing `deviceId` replaces the old
+socket and fails its in-flight commands with `device reconnected`.
 
 ## Appendix B: environment variables
 
@@ -526,3 +561,5 @@ and fails its in-flight commands with `device reconnected`.
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
 | `APK_PATH` | | `/srv/agent.apk` | Path the OTA endpoint serves |
+| `LATEST_AGENT_VERSION` | | the server build's agent version | Version name devices are compared against for `updateAvailable` |
+| `LATEST_AGENT_VERSION_CODE` | | the server build's agent versionCode | Version code devices are compared against for `updateAvailable` |

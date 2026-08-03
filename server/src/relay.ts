@@ -27,6 +27,10 @@ export interface Device {
   name: string;
   sdk: string;
   kind: DeviceKind;
+  /** Agent versionName, or "unknown" for agents that predate version reporting. */
+  agentVersion: string;
+  /** Agent versionCode; 0 when the agent did not report one. */
+  agentVersionCode: number;
   ws: WebSocket;
   connectedAt: number;
   lastSeen: number;

@@ -15,6 +15,12 @@ import { OAuthProvider } from "./oauth.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
 const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
+// The agent build released alongside this server. Devices reporting an older
+// versionCode are flagged as outdated so the operator knows to push the APK the
+// relay already serves at /agent.apk. Override only when the deployed APK is
+// intentionally ahead of or behind this server build.
+const LATEST_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
+const LATEST_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
 const MAX_TIMEOUT_MS = Number(process.env.MAX_TIMEOUT_MS ?? 600_000);
 // External base URL, used in OAuth metadata/redirects (claude.ai connectors).
@@ -36,7 +42,7 @@ function requireEnv(name: string): string {
 // ---------------------------------------------------------------------------
 function buildMcpServer(): McpServer {
   const server = new McpServer(
-    { name: "rish-mcp", version: "0.4.0" },
+    { name: "rish-mcp", version: "0.5.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -85,7 +91,11 @@ function buildMcpServer(): McpServer {
     "list_devices",
     {
       title: "List connected Android devices",
-      description: "Lists Android phones, tablets, and Wear OS watches currently connected to the relay and ready to run commands.",
+      description:
+        "Lists Android phones, tablets, and Wear OS watches currently connected to the relay " +
+        "and ready to run commands. Each device also reports its agent version; " +
+        "updateAvailable means that device runs an agent older than the one this relay " +
+        "serves at /agent.apk and should be updated.",
       inputSchema: {},
     },
     async () => {
@@ -94,6 +104,10 @@ function buildMcpServer(): McpServer {
         name: d.name,
         kind: d.kind,
         sdk: d.sdk,
+        agentVersion: d.agentVersion,
+        agentVersionCode: d.agentVersionCode,
+        latestAgentVersion: LATEST_AGENT_VERSION,
+        updateAvailable: d.agentVersionCode < LATEST_AGENT_VERSION_CODE,
         connectedForMs: Date.now() - d.connectedAt,
         pending: d.pending.size,
       }));
@@ -116,7 +130,12 @@ app.use(express.urlencoded({ extended: false })); // OAuth form + token endpoint
 app.use(oauth.router());
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, devices: registry.list().length });
+  res.json({
+    ok: true,
+    devices: registry.list().length,
+    // Lets an agent (or a shell one-liner) check for a newer build without MCP.
+    agent: { latestVersion: LATEST_AGENT_VERSION, latestVersionCode: LATEST_AGENT_VERSION_CODE },
+  });
 });
 
 // OTA: serve the agent APK so a device can self-update via curl (no sshd needed).
@@ -205,23 +224,42 @@ httpServer.on("upgrade", (req, socket, head) => {
     const name = url.searchParams.get("name") || "Android";
     const sdk = url.searchParams.get("sdk") || "?";
     const kind = normalizeKind(url.searchParams.get("kind"));
-    registerAgent(ws, deviceId, name, sdk, kind);
+    const agentVersion = url.searchParams.get("ver")?.slice(0, 32) || "unknown";
+    const agentVersionCode = Number(url.searchParams.get("vc"));
+    registerAgent(ws, deviceId, name, sdk, kind, agentVersion,
+      Number.isFinite(agentVersionCode) ? agentVersionCode : 0);
   });
 });
 
-function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string, kind: DeviceKind) {
+function registerAgent(
+  ws: WebSocket,
+  deviceId: string,
+  name: string,
+  sdk: string,
+  kind: DeviceKind,
+  agentVersion: string,
+  agentVersionCode: number,
+) {
   const device: Device = {
     id: deviceId,
     name,
     sdk,
     kind,
+    agentVersion,
+    agentVersionCode,
     ws,
     connectedAt: Date.now(),
     lastSeen: Date.now(),
     pending: new Map(),
   };
   registry.add(device);
-  console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk})`);
+  console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk}, agent ${agentVersion})`);
+  if (agentVersionCode < LATEST_AGENT_VERSION_CODE) {
+    console.warn(
+      `[agent] outdated: ${deviceId} runs ${agentVersion} (code ${agentVersionCode}); ` +
+        `latest is ${LATEST_AGENT_VERSION} (code ${LATEST_AGENT_VERSION_CODE})`,
+    );
+  }
 
   // Keepalive. Wear OS pings less often to keep the radio asleep. A pong (or any
   // frame) refreshes lastSeen; if a device misses ~2.5 ping cycles the socket is

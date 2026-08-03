@@ -1,6 +1,6 @@
 # Wear OS support
 
-`rish-mcp` 0.4 uses the **same APK** on normal Android devices and Wear OS watches.
+`rish-mcp` 0.5 uses the **same APK** on normal Android devices and Wear OS watches.
 There is no separate watch build or package name.
 
 ## What changes automatically on a watch
@@ -78,6 +78,9 @@ A watch should appear similar to:
     "name": "SM-Lxxx",
     "kind": "watch",
     "sdk": "36",
+    "agentVersion": "0.5.0",
+    "agentVersionCode": 5,
+    "updateAvailable": false,
     "connectedForMs": 12345,
     "pending": 0
   }

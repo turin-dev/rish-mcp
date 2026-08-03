@@ -240,6 +240,9 @@ class AgentService : Service() {
             append("&name=").append(Build.MODEL.replace(" ", "_"))
             append("&sdk=").append(Build.VERSION.SDK_INT)
             append("&kind=").append(DeviceProfile.kind(this@AgentService))
+            // Reported so the relay can flag agents older than the build it ships.
+            append("&ver=").append(BuildConfig.VERSION_NAME)
+            append("&vc=").append(BuildConfig.VERSION_CODE)
         }
         AgentState.conn = AgentState.Conn.CONNECTING
         updateNotif()
