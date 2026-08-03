@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - master
+      - main
       - "agent/**"
   pull_request:
     branches:
       - master
+      - main
   workflow_dispatch:
 
 permissions:
@@ -49,7 +51,7 @@ jobs:
 
   android-check:
     name: Android + Wear OS test APK
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/master') }}
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -90,7 +92,7 @@ jobs:
 
   official-apk:
     name: Official signed Android + Wear OS APK
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
     needs: server
     runs-on: ubuntu-latest
     timeout-minutes: 30
