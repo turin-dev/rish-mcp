@@ -6,18 +6,27 @@ import android.net.NetworkCapabilities
 
 /** Small compatibility layer shared by phone/tablet and Wear OS builds. */
 object DeviceProfile {
-    fun isWatch(ctx: Context): Boolean =
-        ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_WATCH)
 
+    // hasSystemFeature() is a binder call and the answer never changes at
+    // runtime, so resolve it once instead of on every heartbeat tick.
+    @Volatile private var watch: Boolean? = null
+
+    fun isWatch(ctx: Context): Boolean = watch ?: run {
+        val v = ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_WATCH)
+        watch = v
+        v
+    }
+
+    /** Form factor reported to the relay; also the device-id prefix. */
     fun kind(ctx: Context): String = if (isWatch(ctx)) "watch" else "android"
 
-    fun idPrefix(ctx: Context): String = if (isWatch(ctx)) "watch" else "android"
-
     /**
-     * Watches rely on the relay's lower-frequency server ping instead of also
-     * sending their own OkHttp pings. OkHttp treats 0 as "disabled".
+     * Keepalive ping. A watch pings less often than a handheld to keep the radio
+     * asleep, but NEVER disables pings: OkHttp's ping timeout is the only thing
+     * that surfaces a half-open socket to [AgentService], and the heartbeat below
+     * only reconnects when the state is already known-bad.
      */
-    fun webSocketPingSeconds(ctx: Context): Long = if (isWatch(ctx)) 0L else 20L
+    fun webSocketPingSeconds(ctx: Context): Long = if (isWatch(ctx)) 60L else 20L
 
     fun heartbeatMs(ctx: Context): Long = if (isWatch(ctx)) 90_000L else 30_000L
 

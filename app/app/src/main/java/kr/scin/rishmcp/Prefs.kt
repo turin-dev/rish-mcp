@@ -25,7 +25,7 @@ object Prefs {
         val p = get(ctx)
         var id = p.getString("deviceId", null)
         if (id == null) {
-            id = DeviceProfile.idPrefix(ctx) + "-" + UUID.randomUUID().toString().take(8)
+            id = DeviceProfile.kind(ctx) + "-" + UUID.randomUUID().toString().take(8)
             p.edit().putString("deviceId", id).apply()
         }
         return id
