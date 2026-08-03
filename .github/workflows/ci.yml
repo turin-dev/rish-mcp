@@ -47,8 +47,9 @@ jobs:
       - name: End-to-end smoke test
         run: node test/smoke.mjs
 
-  android:
-    name: Android + Wear OS APK
+  android-check:
+    name: Android + Wear OS test APK
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/master') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -62,7 +63,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Build universal APK
+      - name: Build test APK
         working-directory: app
         env:
           DOCKER: docker
@@ -73,15 +74,93 @@ jobs:
           chmod +x ./build-apk.sh
           ./build-apk.sh
 
-      - name: Show APK info
+      - name: Create checksum
         run: |
-          ls -lh app/rish-mcp-agent.apk
-          sha256sum app/rish-mcp-agent.apk
+          sha256sum app/rish-mcp-agent.apk | tee app/rish-mcp-agent.apk.sha256
 
-      - name: Upload APK
+      - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: rish-mcp-agent-${{ github.sha }}
-          path: app/rish-mcp-agent.apk
+          name: rish-mcp-test-${{ github.sha }}
+          path: |
+            app/rish-mcp-agent.apk
+            app/rish-mcp-agent.apk.sha256
           if-no-files-found: error
           retention-days: 14
+
+  official-apk:
+    name: Official signed Android + Wear OS APK
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    needs: server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore official signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required repository secret: $name"
+              exit 1
+            fi
+          done
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          chmod 600 app/release.keystore
+          keytool -list \
+            -keystore app/release.keystore \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
+
+      - name: Build official APK
+        working-directory: app
+        env:
+          DOCKER: docker
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x ./build-apk.sh
+          ./build-apk.sh
+
+      - name: Verify APK signature
+        working-directory: app
+        run: |
+          docker run --rm \
+            -v "$PWD":/work \
+            rishmcp-android-build \
+            /opt/android-sdk/build-tools/35.0.0/apksigner verify \
+              --verbose --print-certs /work/rish-mcp-agent.apk
+
+      - name: Create official checksum
+        run: |
+          sha256sum app/rish-mcp-agent.apk | tee app/rish-mcp-agent.apk.sha256
+          ls -lh app/rish-mcp-agent.apk app/rish-mcp-agent.apk.sha256
+
+      - name: Upload official APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rish-mcp-official-${{ github.sha }}
+          path: |
+            app/rish-mcp-agent.apk
+            app/rish-mcp-agent.apk.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove signing material
+        if: ${{ always() }}
+        run: rm -f app/release.keystore
