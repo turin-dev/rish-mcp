@@ -80,7 +80,8 @@ echo "DEVICE_TOKEN=$(openssl rand -hex 24)"  >> .env
 ```
 
 ```ini
-MCP_HOST=mcp.example.com          # public hostname (Traefik routes this to :8080)
+MCP_HOST=mcp.example.com          # private: MCP + device WebSocket
+PUBLIC_MCP_HOST=dl.example.com    # public: release metadata + APK, no secrets
 AI_TOKEN=<64 hex chars>           # the "master key" for AI clients — treat like an SSH key
 DEVICE_TOKEN=<48 hex chars>       # shared secret the phone presents on the WS
 # PUBLIC_URL is derived from MCP_HOST by docker-compose; only set it manually
@@ -102,7 +103,8 @@ public.
 
 ### 2.4 DNS + TLS
 
-Point an `A` record at the host: `mcp.example.com → <server-ip>`. Behind
+Point an `A` record at the host for **both** names — `mcp.example.com` and
+`dl.example.com` → `<server-ip>`; Traefik issues a certificate per name. Behind
 Cloudflare, **orange-cloud (proxied) is fine** — HTTPS and WSS both ride `:443`,
 including the phone's `/agent` WebSocket. Traefik obtains the certificate via its
 configured resolver (Let's Encrypt in the sample labels).
@@ -111,7 +113,8 @@ configured resolver (Let's Encrypt in the sample labels).
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":0}   ← 0 until a phone connects (next section)
+# {"ok":true,"devices":0,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+#                    ↑ 0 until a phone connects (next section)
 ```
 
 If you get a TLS or 404 error, the proxy/DNS isn't routing yet — fix that before
@@ -125,7 +128,18 @@ The phone side is one APK. It needs **Shizuku** running (the app that hands out
 `adb shell`-level access without root). Install and start Shizuku first — via
 wireless debugging, a computer, or root.
 
-### 3.1 Build the APK
+### 3.1 Get the APK
+
+Download the signed build from the newest release — either from GitHub or from your
+own public host, which serves the same bytes:
+
+```bash
+curl -sLO https://github.com/turin-dev/rish-mcp/releases/latest/download/rish-mcp-agent.apk
+curl -sO  https://dl.example.com/agent.apk        # same file, via your relay's public host
+```
+
+Or build it yourself (unsigned by the release key, so it cannot update an existing
+install):
 
 ```bash
 cd app && ./build-apk.sh        # runs the Android SDK + Gradle inside Docker
@@ -172,18 +186,19 @@ URL + `DEVICE_TOKEN`, then **Save & Start**.
 
 ### 3.4 What the agent does
 
-- Holds one outbound `wss://…/agent?token=…&deviceId=…&name=…&sdk=…` connection.
+- Holds one outbound `wss://…/agent?token=…&deviceId=…&name=…&sdk=…&kind=…&ver=…&vc=…`
+  connection, reporting its form factor and APK version to the relay.
 - Runs as a **foreground service** (persistent notification) so Android won't kill
   it, and **auto-starts on boot** via `BootReceiver`.
 - A watchdog reconnects on network changes or if Shizuku drops.
-- The relay pings every 25 s to keep the socket warm; a reconnect with the same
-  `deviceId` transparently replaces the stale socket.
+- The relay pings every 25 s to keep the socket warm (60 s on Wear OS); a reconnect
+  with the same `deviceId` transparently replaces the stale socket.
 
 ### 3.5 Confirm it's connected
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1}   ← 1 means the phone's WebSocket is up
+# {"ok":true,"devices":1,...}   ← 1 means the phone's WebSocket is up
 ```
 
 Or ask any connected AI to call `list_devices` (see below).
@@ -197,6 +212,58 @@ can update itself over the same channel — no `adb`/`sshd`:
 rish -c 'curl -sfL "https://mcp.example.com/agent.apk?t=<DEVICE_TOKEN>" -o /data/local/tmp/r.apk \
   && pm install -r -g /data/local/tmp/r.apk && rm -f /data/local/tmp/r.apk'
 ```
+
+**Public downloads.** `PUBLIC_MCP_HOST` runs a second, separate container that serves
+the same APK with no token at `GET /agent.apk`, plus its metadata. It shares only the
+read-only APK volume — it cannot reach the relay, holds no tokens, and says nothing
+about connected devices. The download is rate limited per IP (`DOWNLOADS_PER_HOUR`).
+
+```bash
+curl -sO https://dl.example.com/agent.apk        # no token needed
+```
+
+**Knowing when to update.** Each agent reports its version when it connects, and the
+relay compares it against the build it ships. `list_devices()` marks anything older
+with `updateAvailable: true`, and the relay logs a warning on connect. Nothing updates
+itself — the install above is always a deliberate action.
+
+**Where "latest" comes from.** Both servers fetch the signed APK from the newest
+GitHub release, cache it, and parse the cached bytes — versions are not hardcoded
+anywhere. Publishing a release is the only step; nothing to bump, nothing to redeploy:
+
+```bash
+curl -s https://mcp.example.com/api/version/release
+# {"versionName":"0.5.0","versionCode":5,"source":"apk",
+#  "sizeBytes":5020238,"sha256":"06732f83…","modifiedAt":"2026-08-03T12:40:00.466Z",
+#  "download":"/agent.apk?t=<DEVICE_TOKEN>"}
+```
+
+Unauthenticated on purpose — a device has to be able to ask "is there a newer build?"
+before doing anything else. The download itself still needs `DEVICE_TOKEN`, and the
+published `sha256` lets a client verify what it got. The result is cached on the
+file's size and mtime, so this is cheap to poll.
+
+`source` tells you where the answer came from:
+
+| `source` | Meaning |
+|---|---|
+| `apk` | parsed from the fetched/cached release APK — the normal case |
+| `env` | `LATEST_AGENT_VERSION` / `LATEST_AGENT_VERSION_CODE` are set and win |
+| `fallback` | no readable APK at `APK_PATH`; the compiled-in value is being used, and the relay logs why |
+
+A `fallback` here means no release has been fetched and none is cached — version
+reporting is not trustworthy until one lands. The servers log why each attempt failed.
+
+`/healthz` carries the same numbers:
+
+```bash
+curl -s https://mcp.example.com/healthz
+# {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+```
+
+The APK must be signed with the same key as the installed one, or `pm install -r`
+fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Test APKs from pull-request CI use a
+disposable key and cannot update an official install — see [SIGNING.md](SIGNING.md).
 
 ---
 
@@ -303,20 +370,27 @@ The server advertises exactly two tools.
 
 ### `list_devices()`
 
-No arguments. Returns a JSON array of connected phones:
+No arguments. Returns a JSON array of connected devices:
 
 ```json
 [
-  { "id": "s23-1a2b3c4d", "name": "phone", "sdk": "36",
+  { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android", "sdk": "36",
+    "agentVersion": "0.5.0", "agentVersionCode": 5,
+    "latestAgentVersion": "0.5.0", "updateAvailable": false,
     "connectedForMs": 84213, "pending": 0 }
 ]
 ```
 
-- `id` — device id; pass it to `run_shell` as `deviceId` when more than one phone
+- `id` — device id; pass it to `run_shell` as `deviceId` when more than one device
   is connected.
+- `kind` — `android` (phone/tablet) or `watch` (Wear OS).
+- `agentVersion` / `agentVersionCode` — the APK running on that device.
+  Agents installed before version reporting existed report `"unknown"` / `0`.
+- `updateAvailable` — that device runs an older agent than the APK the relay
+  currently serves, read live from that file. See [§ 3.6](#36-ota-self-update).
 - `pending` — commands currently in flight to that device.
 
-Call this first if you're unsure which phone is online.
+Call this first if you're unsure which device is online.
 
 ### `run_shell({ cmd, deviceId?, timeoutMs? })`
 
@@ -510,9 +584,14 @@ The phone↔relay messages are newline-free JSON frames over the WebSocket.
 ```
 
 Connection query params on `GET /agent`: `token` (required, = `DEVICE_TOKEN`),
-`deviceId` (optional; server assigns a UUID if absent), `name`, `sdk`. The relay
-pings every 25 s; a reconnect with an existing `deviceId` replaces the old socket
-and fails its in-flight commands with `device reconnected`.
+`deviceId` (optional; server assigns a UUID if absent), `name`, `sdk`, `kind`
+(`android` or `watch`; anything else is coerced to `android`), `ver` (agent
+versionName) and `vc` (agent versionCode). All but `token` are optional — an agent
+that omits `ver`/`vc` is recorded as version `unknown` and flagged as outdated.
+
+The relay pings every 25 s (60 s for `kind=watch`) and terminates a connection that
+misses ~2.5 ping cycles. A reconnect with an existing `deviceId` replaces the old
+socket and fails its in-flight commands with `device reconnected`.
 
 ## Appendix B: environment variables
 
@@ -525,4 +604,12 @@ and fails its in-flight commands with `device reconnected`.
 | `PORT` | | `8080` | Internal listen port |
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
-| `APK_PATH` | | `/srv/agent.apk` | Path the OTA endpoint serves |
+| `APK_PATH` | | — | Serve this local APK instead of fetching a release. Dev/test escape hatch; disables GitHub polling |
+| `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose latest release supplies the APK |
+| `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |
+| `RELEASE_POLL_MS` | | `900000` | How often to check GitHub for a newer release |
+| `GITHUB_API_BASE` | | `https://api.github.com` | Overridable for testing |
+| `PUBLIC_MCP_HOST` | compose | — | Public hostname for the release/APK container |
+| `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on the public, tokenless APK download |
+| `LATEST_AGENT_VERSION` | | read from the APK at `APK_PATH` | Overrides the version name devices are compared against for `updateAvailable` |
+| `LATEST_AGENT_VERSION_CODE` | | read from the APK at `APK_PATH` | Overrides the version code devices are compared against for `updateAvailable` |

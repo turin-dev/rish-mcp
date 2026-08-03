@@ -1,6 +1,11 @@
-// End-to-end smoke test: fake phone agent + MCP client through the real server.
+// End-to-end smoke test: fake Android agent + MCP client through the real server.
 import { spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -10,7 +15,11 @@ const AI_TOKEN = "ai-test-token";
 const DEVICE_TOKEN = "device-test-token";
 const base = `http://127.0.0.1:${PORT}`;
 
-const env = { ...process.env, PORT: String(PORT), AI_TOKEN, DEVICE_TOKEN, PUBLIC_URL: base };
+// Point the relay at the APK the repo actually builds when one is present, so
+// the version endpoint is exercised against a real binary rather than a stub.
+const APK_PATH = fileURLToPath(new URL("../../app/rish-mcp-agent.apk", import.meta.url));
+const hasApk = existsSync(APK_PATH);
+const env = { ...process.env, PORT: String(PORT), AI_TOKEN, DEVICE_TOKEN, PUBLIC_URL: base, APK_PATH };
 const srv = spawn("node", ["dist/index.js"], { env, stdio: "inherit" });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -20,8 +29,31 @@ const assert = (c, m) => { if (!c) { console.error("ASSERT FAIL:", m); failed = 
 try {
   await sleep(800);
 
-  // Fake phone: connect to relay, actually run commands in the local shell as a stand-in for rish.
-  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-phone&name=FakeS23&sdk=36`);
+  // Fake watch: connect to relay, actually run commands in the local shell as a stand-in for Shizuku.
+  // The relay reads "latest" out of the APK it serves. Cross-check the parsed
+  // result against build.gradle.kts, which is what the APK was built from —
+  // a silently wrong parse would otherwise mark every device as up to date.
+  const gradle = readFileSync(new URL("../../app/app/build.gradle.kts", import.meta.url), "utf8");
+  const gradleCode = Number(gradle.match(/versionCode\s*=\s*(\d+)/)[1]);
+  const gradleName = gradle.match(/versionName\s*=\s*"([^"]+)"/)[1];
+
+  const rel = await (await fetch(`${base}/api/version/release`)).json();
+  if (hasApk) {
+    assert(rel.source === "apk", "release version is read from the served APK");
+    assert(rel.versionCode === gradleCode && rel.versionName === gradleName,
+      `APK parser reads ${rel.versionName}/${rel.versionCode} matching build.gradle.kts (${gradleName}/${gradleCode})`);
+    assert(/^[0-9a-f]{64}$/.test(rel.sha256), "release endpoint publishes a sha256");
+    assert(rel.sizeBytes > 0, "release endpoint publishes the APK size");
+  } else {
+    console.log("skip - no built APK; version endpoint falls back to its constant");
+    assert(rel.source === "fallback", "release version falls back when no APK is mounted");
+  }
+
+  const health = await (await fetch(`${base}/healthz`)).json();
+  assert(health.agent.latestVersionCode === rel.versionCode,
+    "healthz agrees with the release endpoint");
+
+  const agent = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-watch&name=FakeWatch&sdk=36&kind=watch&ver=${rel.versionName}&vc=${rel.versionCode}`);
   await new Promise((res, rej) => { agent.once("open", res); agent.once("error", rej); });
   agent.on("message", (raw) => {
     const m = JSON.parse(raw.toString());
@@ -46,10 +78,15 @@ try {
   assert(tools.tools.some((t) => t.name === "list_devices"), "list_devices tool advertised");
 
   const dev = await client.callTool({ name: "list_devices", arguments: {} });
-  assert(dev.content[0].text.includes("test-phone"), "list_devices shows the fake phone");
+  assert(dev.content[0].text.includes("test-watch"), "list_devices shows the fake watch");
+  assert(dev.content[0].text.includes('"kind": "watch"'), "list_devices exposes watch form factor");
+  const cur = JSON.parse(dev.content[0].text)[0];
+  assert(cur.agentVersion === rel.versionName && cur.agentVersionCode === rel.versionCode,
+    "list_devices reports the agent version");
+  assert(cur.updateAvailable === false, "a current agent is not flagged for update");
 
-  const ok = await client.callTool({ name: "run_shell", arguments: { cmd: "echo hello-from-phone" } });
-  assert(ok.content[0].text.includes("hello-from-phone"), "run_shell returns stdout");
+  const ok = await client.callTool({ name: "run_shell", arguments: { cmd: "echo hello-from-watch" } });
+  assert(ok.content[0].text.includes("hello-from-watch"), "run_shell returns stdout");
   assert(ok.content[0].text.includes("exit=0"), "run_shell reports exit=0");
 
   const bad = await client.callTool({ name: "run_shell", arguments: { cmd: "sh -c 'exit 7'" } });
@@ -141,7 +178,157 @@ try {
   });
   assert(replay.status === 400, "auth code cannot be replayed");
 
+  // --- second device: handheld defaults + multi-device routing ---
+  // No kind= param at all, so this also covers the "android" fallback and the
+  // coercion of a bogus form factor.
+  const phone = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-phone&name=FakePhone&sdk=36&kind=bogus`);
+  await new Promise((res, rej) => { phone.once("open", res); phone.once("error", rej); });
+  phone.on("message", (raw) => {
+    const m = JSON.parse(raw.toString());
+    if (m.type !== "exec") return;
+    phone.send(JSON.stringify({ type: "result", reqId: m.reqId, code: 0, stdout: "hello-from-phone\n", stderr: "", durationMs: 1 }));
+  });
+  await sleep(200);
+
+  const multi = new Client({ name: "smoke-multi", version: "1.0.0" });
+  await multi.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${AI_TOKEN}` } },
+  }));
+
+  const both = JSON.parse((await multi.callTool({ name: "list_devices", arguments: {} })).content[0].text);
+  assert(both.length === 2, "list_devices shows both devices");
+  assert(both.find((d) => d.id === "test-watch")?.kind === "watch", "watch keeps kind=watch");
+  assert(both.find((d) => d.id === "test-phone")?.kind === "android", "unknown kind coerced to android");
+
+  // test-phone sent no ver/vc at all — an agent from before version reporting.
+  const old = both.find((d) => d.id === "test-phone");
+  assert(old.agentVersion === "unknown" && old.agentVersionCode === 0,
+    "agent that reports no version is recorded as unknown");
+  assert(old.updateAvailable === true, "agent predating version reporting is flagged for update");
+
+  const ambiguous = await multi.callTool({ name: "run_shell", arguments: { cmd: "echo x" } });
+  assert(ambiguous.isError === true && ambiguous.content[0].text.includes("deviceId"),
+    "run_shell without deviceId is rejected when several devices are online");
+
+  const routed = await multi.callTool({ name: "run_shell", arguments: { cmd: "echo hi", deviceId: "test-phone" } });
+  assert(routed.content[0].text.includes("hello-from-phone"), "run_shell routes to the requested deviceId");
+
+  await multi.close();
+  phone.close();
   agent.close();
+
+  // --- public release endpoint (separate process, separate hostname) ---
+  const PUB = 8097;
+  const pub = spawn("node", ["dist/public.js"], {
+    env: { ...process.env, PORT: String(PUB), APK_PATH, DOWNLOADS_PER_HOUR: "3" },
+    stdio: "inherit",
+  });
+  const pubBase = `http://127.0.0.1:${PUB}`;
+  try {
+    await sleep(600);
+
+    // With no APK there is nothing to publish, so the public service reports
+    // unavailable rather than inventing a version the way the relay's fallback does.
+    const pubRes = await fetch(`${pubBase}/api/version/release`);
+    const pubRel = await pubRes.json();
+    if (hasApk) {
+      assert(pubRes.status === 200, "public release endpoint answers when an APK is mounted");
+      assert(pubRel.versionCode === rel.versionCode && pubRel.versionName === rel.versionName,
+        "public endpoint reports the same release as the relay");
+      assert(pubRel.download === "/agent.apk", "public release advertises a tokenless download");
+    } else {
+      assert(pubRes.status === 503, "public release endpoint is unavailable with no APK");
+      assert((await (await fetch(`${pubBase}/healthz`)).json()).ok === false,
+        "public healthz reports unhealthy with no APK");
+      assert((await fetch(`${pubBase}/agent.apk`)).status === 503,
+        "public APK download is unavailable with no APK");
+    }
+
+    // The whole point of the split: the public host must not reach the relay.
+    for (const path of ["/mcp", "/agent", "/.well-known/oauth-authorization-server"]) {
+      const r = await fetch(`${pubBase}${path}`);
+      assert(r.status === 404, `public host has no ${path}`);
+    }
+
+    if (hasApk) {
+      const dl = await fetch(`${pubBase}/agent.apk`);
+      const bytes = Buffer.from(await dl.arrayBuffer());
+      assert(dl.status === 200, "public APK download needs no token");
+      assert(createHash("sha256").update(bytes).digest("hex") === pubRel.sha256,
+        "downloaded APK matches the advertised sha256");
+      assert(dl.headers.get("content-type") === "application/vnd.android.package-archive",
+        "APK is served with the android package content type");
+
+      // DOWNLOADS_PER_HOUR=3: one above plus two more, then the fourth is refused.
+      await fetch(`${pubBase}/agent.apk`);
+      await fetch(`${pubBase}/agent.apk`);
+      assert((await fetch(`${pubBase}/agent.apk`)).status === 429,
+        "public APK download is rate limited per IP");
+    }
+  } finally {
+    pub.kill("SIGTERM");
+  }
+
+  // --- release fetched from GitHub (fake API, so CI stays offline) ---
+  if (hasApk) {
+    const apkBytes = readFileSync(APK_PATH);
+    const TAG = "v9.9.9";
+    let apiHits = 0;
+    const gh = createServer((req, res) => {
+      if (req.url.endsWith("/releases/latest")) {
+        apiHits++;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({
+          tag_name: TAG,
+          assets: [{ name: `rish-mcp-agent-${TAG}.apk`, browser_download_url: `http://127.0.0.1:${GH_PORT}/dl` }],
+        }));
+      } else if (req.url === "/dl") {
+        res.setHeader("content-type", "application/vnd.android.package-archive");
+        res.end(apkBytes);
+      } else {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    const GH_PORT = 8096;
+    await new Promise((r) => gh.listen(GH_PORT, "127.0.0.1", r));
+    const cacheDir = mkdtempSync(join(tmpdir(), "rish-release-"));
+    const FETCH_PORT = 8095;
+    const fetchEnv = {
+      ...process.env, PORT: String(FETCH_PORT), APK_PATH: "",
+      GITHUB_API_BASE: `http://127.0.0.1:${GH_PORT}`, RELEASE_CACHE_DIR: cacheDir,
+    };
+    delete fetchEnv.APK_PATH; // no local override: force the GitHub path
+
+    let fetcher = spawn("node", ["dist/public.js"], { env: fetchEnv, stdio: "inherit" });
+    const fetchBase = `http://127.0.0.1:${FETCH_PORT}`;
+    try {
+      await sleep(1200);
+      const fr = await (await fetch(`${fetchBase}/api/version/release`)).json();
+      assert(fr.tag === TAG, `release is fetched from GitHub (tag ${fr.tag})`);
+      assert(fr.versionName === gradleName, "fetched release reports the APK's own version");
+      assert(fr.sha256 === createHash("sha256").update(apkBytes).digest("hex"),
+        "fetched release sha256 matches the served bytes");
+      assert(existsSync(join(cacheDir, "agent.apk")), "fetched APK is cached on disk");
+
+      const dl = Buffer.from(await (await fetch(`${fetchBase}/agent.apk`)).arrayBuffer());
+      assert(dl.equals(apkBytes), "download serves the fetched bytes byte-for-byte");
+
+      // Restart with GitHub unreachable: the cache has to carry it.
+      fetcher.kill("SIGTERM");
+      await sleep(300);
+      await new Promise((r) => gh.close(r));
+      fetcher = spawn("node", ["dist/public.js"], { env: fetchEnv, stdio: "inherit" });
+      await sleep(1200);
+      const cached = await (await fetch(`${fetchBase}/api/version/release`)).json();
+      assert(cached.tag === TAG && cached.versionName === gradleName,
+        "cached release still served when GitHub is unreachable");
+      assert(apiHits >= 1, "GitHub API was actually queried");
+    } finally {
+      fetcher.kill("SIGTERM");
+      try { gh.close(); } catch { /* already closed */ }
+    }
+  }
 } catch (e) {
   console.error("THREW:", e);
   failed = true;

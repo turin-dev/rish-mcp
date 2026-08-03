@@ -15,17 +15,29 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/** Form factor an agent may claim. Anything else is coerced to "android". */
+export type DeviceKind = "android" | "watch";
+
+export function normalizeKind(raw: string | null | undefined): DeviceKind {
+  return raw === "watch" ? "watch" : "android";
+}
+
 export interface Device {
   id: string;
   name: string;
   sdk: string;
+  kind: DeviceKind;
+  /** Agent versionName, or "unknown" for agents that predate version reporting. */
+  agentVersion: string;
+  /** Agent versionCode; 0 when the agent did not report one. */
+  agentVersionCode: number;
   ws: WebSocket;
   connectedAt: number;
   lastSeen: number;
   pending: Map<string, Pending>;
 }
 
-/** In-memory registry of phones currently connected over the WS relay. */
+/** In-memory registry of Android devices currently connected over the WS relay. */
 class Registry {
   private devices = new Map<string, Device>();
 
@@ -72,7 +84,7 @@ class Registry {
     d.pending.clear();
   }
 
-  /** Resolve a pending exec when the phone returns a result. */
+  /** Resolve a pending exec when an Android device returns a result. */
   resolveResult(deviceId: string, reqId: string, msg: Partial<ExecResult>) {
     const device = this.devices.get(deviceId);
     if (!device) return;
@@ -97,7 +109,7 @@ class Registry {
       const hint = deviceId
         ? `device '${deviceId}' is not connected`
         : this.devices.size === 0
-          ? "no phone is connected to the relay"
+          ? "no Android device is connected to the relay"
           : "multiple devices connected; pass deviceId";
       return Promise.reject(new Error(hint));
     }
@@ -106,7 +118,7 @@ class Registry {
       const timer = setTimeout(() => {
         device.pending.delete(reqId);
         reject(new Error(`exec timed out after ${timeoutMs}ms`));
-      }, timeoutMs + 2000); // grace over the phone-side timeout
+      }, timeoutMs + 2000); // grace over the device-side timeout
       device.pending.set(reqId, { resolve, reject, timer });
       try {
         device.ws.send(JSON.stringify({ type: "exec", reqId, cmd, timeoutMs }));

@@ -1,26 +1,46 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
 import express, { type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { registry, type Device } from "./relay.js";
+import { registry, normalizeKind, type Device, type DeviceKind } from "./relay.js";
 import { OAuthProvider } from "./oauth.js";
+import { ReleaseSource, releaseOptionsFromEnv, type Release } from "./release.js";
 
 // ---------------------------------------------------------------------------
 // Config (all via env; see .env.example)
 // ---------------------------------------------------------------------------
 const PORT = Number(process.env.PORT ?? 8080);
 const AI_TOKEN = requireEnv("AI_TOKEN"); // bearer the AI/MCP client must present
-const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the phone presents
+const DEVICE_TOKEN = requireEnv("DEVICE_TOKEN"); // shared secret the Android device presents
+// The APK this relay hands out, and therefore what "latest" means to it. Comes
+// from the GitHub release CI publishes (or APK_PATH locally); see release.ts.
+const releases = new ReleaseSource(releaseOptionsFromEnv());
+// Used only when no release has been fetched yet and none is cached.
+const FALLBACK_AGENT_VERSION = process.env.LATEST_AGENT_VERSION ?? "0.5.0";
+const FALLBACK_AGENT_VERSION_CODE = Number(process.env.LATEST_AGENT_VERSION_CODE ?? 5);
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEFAULT_TIMEOUT_MS ?? 60_000);
 const MAX_TIMEOUT_MS = Number(process.env.MAX_TIMEOUT_MS ?? 600_000);
 // External base URL, used in OAuth metadata/redirects (claude.ai connectors).
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 
 const oauth = new OAuthProvider({ publicUrl: PUBLIC_URL, aiToken: AI_TOKEN });
+
+/**
+ * What the relay currently ships. An explicit env override wins; otherwise it is
+ * whatever release has been fetched or cached. With neither, fall back to the
+ * compiled-in value rather than reporting every device as up to date.
+ */
+function latestAgent(): { version: string; versionCode: number; source: string; release?: Release } {
+  if (process.env.LATEST_AGENT_VERSION_CODE || process.env.LATEST_AGENT_VERSION) {
+    return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "env" };
+  }
+  const r = releases.get();
+  if (r) return { version: r.versionName, versionCode: r.versionCode, source: "apk", release: r };
+  return { version: FALLBACK_AGENT_VERSION, versionCode: FALLBACK_AGENT_VERSION_CODE, source: "fallback" };
+}
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -36,24 +56,24 @@ function requireEnv(name: string): string {
 // ---------------------------------------------------------------------------
 function buildMcpServer(): McpServer {
   const server = new McpServer(
-    { name: "rish-mcp", version: "0.2.0" },
+    { name: "rish-mcp", version: "0.5.0" },
     { capabilities: { tools: {} } },
   );
 
   server.registerTool(
     "run_shell",
     {
-      title: "Run a shell command on the phone",
+      title: "Run a shell command on an Android device",
       description:
-        "Executes a shell command on the connected Android phone with Shizuku " +
+        "Executes a shell command on a connected Android phone, tablet, or Wear OS watch with Shizuku " +
         "shell privileges (uid 2000), like an adb shell. Returns stdout, stderr " +
-        "and the exit code. Use list_devices first if unsure which phone is online.",
+        "and the exit code. Use list_devices first if unsure which device is online.",
       inputSchema: {
         cmd: z.string().min(1).describe("The shell command line to run, e.g. 'getprop ro.product.model'"),
         deviceId: z
           .string()
           .optional()
-          .describe("Target device id; optional when exactly one phone is connected"),
+          .describe("Target device id; optional when exactly one Android device is connected"),
         timeoutMs: z
           .number()
           .int()
@@ -84,15 +104,25 @@ function buildMcpServer(): McpServer {
   server.registerTool(
     "list_devices",
     {
-      title: "List connected phones",
-      description: "Lists Android phones currently connected to the relay and ready to run commands.",
+      title: "List connected Android devices",
+      description:
+        "Lists Android phones, tablets, and Wear OS watches currently connected to the relay " +
+        "and ready to run commands. Each device also reports its agent version; " +
+        "updateAvailable means that device runs an agent older than the one this relay " +
+        "serves at /agent.apk and should be updated.",
       inputSchema: {},
     },
     async () => {
+      const latest = latestAgent();
       const devices = registry.list().map((d) => ({
         id: d.id,
         name: d.name,
+        kind: d.kind,
         sdk: d.sdk,
+        agentVersion: d.agentVersion,
+        agentVersionCode: d.agentVersionCode,
+        latestAgentVersion: latest.version,
+        updateAvailable: d.agentVersionCode < latest.versionCode,
         connectedForMs: Date.now() - d.connectedAt,
         pending: d.pending.size,
       }));
@@ -115,24 +145,48 @@ app.use(express.urlencoded({ extended: false })); // OAuth form + token endpoint
 app.use(oauth.router());
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, devices: registry.list().length });
+  const latest = latestAgent();
+  res.json({
+    ok: true,
+    devices: registry.list().length,
+    // Lets an agent (or a shell one-liner) check for a newer build without MCP.
+    agent: { latestVersion: latest.version, latestVersionCode: latest.versionCode },
+  });
 });
 
-// OTA: serve the agent APK so a phone can self-update via curl (no sshd needed).
+// Current release of the agent, read live from the APK this relay serves.
+// Unauthenticated on purpose: a device has to be able to ask "is there a newer
+// build?" before it has done anything else. The download itself still needs the
+// device token. sha256 lets a client verify what it downloaded.
+app.get("/api/version/release", (_req, res) => {
+  const latest = latestAgent();
+  res.json({
+    versionName: latest.version,
+    versionCode: latest.versionCode,
+    source: latest.source,
+    sizeBytes: latest.release?.sizeBytes ?? null,
+    sha256: latest.release?.sha256 ?? null,
+    modifiedAt: latest.release?.modifiedAt ?? null,
+    download: "/agent.apk?t=<DEVICE_TOKEN>",
+  });
+});
+
+// OTA: serve the agent APK so a device can self-update via curl (no sshd needed).
 // Token-gated with the device token; path is mounted read-only into the container.
-const APK_PATH = process.env.APK_PATH ?? "/srv/agent.apk";
 app.get("/agent.apk", (req: Request, res: Response) => {
   if ((req.query.t ?? "") !== DEVICE_TOKEN) {
     res.status(401).type("text/plain").send("unauthorized");
     return;
   }
-  if (!existsSync(APK_PATH)) {
+  const r = releases.get();
+  if (!r) {
     res.status(404).type("text/plain").send("apk not available");
     return;
   }
   res.setHeader("Content-Type", "application/vnd.android.package-archive");
-  res.setHeader("Content-Length", String(statSync(APK_PATH).size));
-  res.sendFile(APK_PATH);
+  res.setHeader("Content-Length", String(r.sizeBytes));
+  res.setHeader("X-Apk-Sha256", r.sha256);
+  res.sendFile(r.path);
 });
 
 function checkAiAuth(req: Request, res: Response): boolean {
@@ -182,7 +236,7 @@ app.get("/mcp", methodNotAllowed);
 app.delete("/mcp", methodNotAllowed);
 
 // ---------------------------------------------------------------------------
-// WS relay: the phone connects here (outbound) and stays connected.
+// WS relay: the Android device connects here (outbound) and stays connected.
 // ---------------------------------------------------------------------------
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -201,29 +255,66 @@ httpServer.on("upgrade", (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     const deviceId = url.searchParams.get("deviceId") || randomUUID();
-    const name = url.searchParams.get("name") || "phone";
+    const name = url.searchParams.get("name") || "Android";
     const sdk = url.searchParams.get("sdk") || "?";
-    registerAgent(ws, deviceId, name, sdk);
+    const kind = normalizeKind(url.searchParams.get("kind"));
+    const agentVersion = url.searchParams.get("ver")?.slice(0, 32) || "unknown";
+    const agentVersionCode = Number(url.searchParams.get("vc"));
+    registerAgent(ws, deviceId, name, sdk, kind, agentVersion,
+      Number.isFinite(agentVersionCode) ? agentVersionCode : 0);
   });
 });
 
-function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: string) {
+function registerAgent(
+  ws: WebSocket,
+  deviceId: string,
+  name: string,
+  sdk: string,
+  kind: DeviceKind,
+  agentVersion: string,
+  agentVersionCode: number,
+) {
   const device: Device = {
     id: deviceId,
     name,
     sdk,
+    kind,
+    agentVersion,
+    agentVersionCode,
     ws,
     connectedAt: Date.now(),
     lastSeen: Date.now(),
     pending: new Map(),
   };
   registry.add(device);
-  console.log(`[agent] connected: ${deviceId} (${name}, sdk ${sdk})`);
+  console.log(`[agent] connected: ${deviceId} (${kind}, ${name}, sdk ${sdk}, agent ${agentVersion})`);
+  const latest = latestAgent();
+  if (agentVersionCode < latest.versionCode) {
+    console.warn(
+      `[agent] outdated: ${deviceId} runs ${agentVersion} (code ${agentVersionCode}); ` +
+        `latest is ${latest.version} (code ${latest.versionCode})`,
+    );
+  }
 
-  // Keepalive: the relay pings; the phone keeps the outbound socket warm.
+  // Keepalive. Wear OS pings less often to keep the radio asleep. A pong (or any
+  // frame) refreshes lastSeen; if a device misses ~2.5 ping cycles the socket is
+  // half-open — TCP alone can sit on that for many minutes, so terminate it and
+  // let the agent redial rather than leaving a zombie in the registry.
+  const pingEveryMs = kind === "watch" ? 60_000 : 25_000;
+  const staleAfterMs = pingEveryMs * 2.5;
   const ping = setInterval(() => {
-    if (ws.readyState === ws.OPEN) ws.ping();
-  }, 25_000);
+    if (ws.readyState !== ws.OPEN) return;
+    if (Date.now() - device.lastSeen > staleAfterMs) {
+      console.warn(`[agent] stale, terminating: ${deviceId} (no traffic for ${staleAfterMs}ms)`);
+      ws.terminate();
+      return;
+    }
+    ws.ping();
+  }, pingEveryMs);
+
+  ws.on("pong", () => {
+    device.lastSeen = Date.now();
+  });
 
   ws.on("message", (raw) => {
     device.lastSeen = Date.now();
@@ -252,9 +343,10 @@ function registerAgent(ws: WebSocket, deviceId: string, name: string, sdk: strin
   ws.on("error", (e) => console.error(`[agent] ws error ${deviceId}:`, e.message));
 }
 
+releases.start();
 httpServer.listen(PORT, () => {
   console.log(`rish-mcp server listening on :${PORT}`);
   console.log(`  MCP (AI):   POST /mcp        (Bearer AI_TOKEN or OAuth access token)`);
   console.log(`  OAuth:      ${PUBLIC_URL}/oauth/authorize (claude.ai connectors)`);
-  console.log(`  Relay (phone): WS  /agent?token=DEVICE_TOKEN&deviceId=...`);
+  console.log(`  Relay:      WS  /agent?token=DEVICE_TOKEN&deviceId=...&kind=android|watch`);
 });

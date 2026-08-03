@@ -32,19 +32,25 @@ import java.util.concurrent.TimeUnit
  * Always-on foreground service. Holds one outbound WebSocket to the relay and
  * executes forwarded commands via the Shizuku-backed [ShellUserService].
  *
+ * The same APK is used on phones/tablets and Wear OS. Watches use a slower
+ * WebSocket ping/heartbeat cadence to reduce radio wakeups and battery drain.
+ *
  * Watchdog: (1) a ConnectivityManager callback forces an immediate reconnect on
- * any network change (data<->wifi) so there is no ~20s ping-timeout gap; (2)
- * Shizuku binder listeners rebind the shell backend when Shizuku comes/goes; and
- * (3) a periodic heartbeat re-establishes anything that silently dropped.
+ * any network change (data<->wifi<->phone proxy) so there is no long ping-timeout
+ * gap; (2) Shizuku binder listeners rebind the shell backend when Shizuku
+ * comes/goes; and (3) a periodic heartbeat re-establishes anything that silently
+ * dropped.
  */
 class AgentService : Service() {
 
     private val main = Handler(Looper.getMainLooper())
     private val execPool = Executors.newSingleThreadExecutor()
-    private val http = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val http by lazy {
+        OkHttpClient.Builder()
+            .pingInterval(DeviceProfile.webSocketPingSeconds(this), TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
 
     @Volatile private var ws: WebSocket? = null
@@ -64,7 +70,7 @@ class AgentService : Service() {
         registerNetworkCallback()
         bindShizuku()
         connect()
-        main.postDelayed(heartbeat, HEARTBEAT_MS)
+        main.postDelayed(heartbeat, DeviceProfile.heartbeatMs(this))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -146,9 +152,8 @@ class AgentService : Service() {
 
     // --- network watchdog -----------------------------------------------------
     // Use the DEFAULT-network callback: it fires when the network the app's
-    // traffic actually uses changes (wifi<->cellular), not on every signal blip.
-    // We reconnect ONLY on a genuine handover and never cancel a healthy socket,
-    // so in-flight commands aren't killed on a multi-homed/flapping device.
+    // traffic actually uses changes, not on every signal blip. On Wear OS this
+    // may be Wi-Fi, cellular, or a Bluetooth/phone-proxied path.
 
     @Volatile private var connectedNetHandle = 0L
 
@@ -168,13 +173,7 @@ class AgentService : Service() {
         }
     }
 
-    private fun typeOf(caps: NetworkCapabilities?): String = when {
-        caps == null -> "none"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-        else -> "other"
-    }
+    private fun typeOf(caps: NetworkCapabilities?): String = DeviceProfile.networkLabel(caps)
 
     private fun registerNetworkCallback() {
         try { connectivity.registerDefaultNetworkCallback(netCallback) } catch (e: Throwable) {
@@ -213,7 +212,7 @@ class AgentService : Service() {
                 AgentState.conn != AgentState.Conn.CONNECTING) {
                 connect()
             }
-            main.postDelayed(this, HEARTBEAT_MS)
+            main.postDelayed(this, DeviceProfile.heartbeatMs(this@AgentService))
         }
     }
 
@@ -240,6 +239,10 @@ class AgentService : Service() {
             append("&deviceId=").append(Prefs.deviceId(this@AgentService))
             append("&name=").append(Build.MODEL.replace(" ", "_"))
             append("&sdk=").append(Build.VERSION.SDK_INT)
+            append("&kind=").append(DeviceProfile.kind(this@AgentService))
+            // Reported so the relay can flag agents older than the build it ships.
+            append("&ver=").append(BuildConfig.VERSION_NAME)
+            append("&vc=").append(BuildConfig.VERSION_CODE)
         }
         AgentState.conn = AgentState.Conn.CONNECTING
         updateNotif()
@@ -326,7 +329,7 @@ class AgentService : Service() {
             nm.createNotificationChannel(ch)
         }
         return Notification.Builder(this, CHANNEL)
-            .setContentTitle("rish-mcp agent")
+            .setContentTitle(if (DeviceProfile.isWatch(this)) "rish-mcp watch agent" else "rish-mcp agent")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
@@ -337,7 +340,6 @@ class AgentService : Service() {
         private const val TAG = "rishmcp"
         private const val CHANNEL = "rishmcp-agent"
         private const val NOTIF_ID = 42
-        private const val HEARTBEAT_MS = 30_000L
 
         fun start(ctx: android.content.Context, reconnect: Boolean = false) {
             val i = Intent(ctx, AgentService::class.java).putExtra("reconnect", reconnect)

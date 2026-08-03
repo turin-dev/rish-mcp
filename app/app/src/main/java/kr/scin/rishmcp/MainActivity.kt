@@ -58,6 +58,9 @@ class MainActivity : AppCompatActivity() {
         relayField = findViewById(R.id.relayField)
         tokenField = findViewById(R.id.tokenField)
 
+        findViewById<TextView>(R.id.subtitle).text =
+            if (DeviceProfile.isWatch(this)) "Wear OS · Shizuku shell → MCP" else "Shizuku shell → MCP agent"
+
         relayField.setText(relayUrl)
         tokenField.setText(deviceToken)
 
@@ -88,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Headless provisioning from a shell:
      *   am start -n kr.scin.rishmcp/.MainActivity \
-     *     --es relay wss://mcp.example.com/agent --es token <DEVICE_TOKEN> --ez autostart true
+     *     --es relay wss://mcp.turin.my/agent --es token <DEVICE_TOKEN> --ez autostart true
      */
     private fun handleProvisioning(intent: Intent?) {
         intent ?: return
@@ -153,7 +156,7 @@ class MainActivity : AppCompatActivity() {
         }
         rowShizuku.text = "Shizuku:  $shizukuLive"
         rowNetwork.text = "Network:  ${s.network}"
-        rowDevice.text = "Device:   ${Prefs.deviceId(this)}"
+        rowDevice.text = "Device:   ${Build.MODEL} · ${Prefs.deviceId(this)}"
         rowStats.text = "Commands: ${s.commandsRun}" +
             if (s.lastCommandAt > 0) "  (last ${fmtDuration(System.currentTimeMillis() - s.lastCommandAt)} ago)" else ""
         rowEvent.text = s.lastEvent

@@ -1,33 +1,60 @@
 # rish-mcp
 
-Expose an Android phone's **Shizuku shell** (uid 2000, like `adb shell`) to AIs as
-an **MCP tool** — **without VPN, adb, or sshd**. The phone holds a single
+Expose an Android device's **Shizuku shell** (uid 2000, like `adb shell`) to AIs as
+an **MCP tool** — **without VPN, adb, or sshd**. The device holds a single
 **outbound** WebSocket to a relay on a public hostname you control; AIs call the relay's MCP endpoint.
 
 ```
 ┌─────────┐  MCP run_shell    ┌──────────────────────┐   WS (outbound)   ┌──────────────┐
-│   AI    │ ──HTTPS+Bearer──▶ │     relay + MCP      │ ◀── phone dials ──│  phone APK   │
+│   AI    │ ──HTTPS+Bearer──▶ │     relay + MCP      │ ◀── device dials ─│ Android APK  │
 │(Claude) │ ◀── stdout/code── │   (Node, Dokploy)    │ ── exec cmd ─────▶│ Shizuku→shell │
 └─────────┘                   └──────────────────────┘                   └──────────────┘
 ```
 
-Phone has **zero inbound** exposure (works behind SKT CGNAT). No VPN, no adb, no sshd.
+The Android device has **zero inbound** exposure (works behind CGNAT). No VPN, no adb, no sshd.
+The same APK supports normal Android phones/tablets and Wear OS watches.
 
 > [!IMPORTANT]
-> `mcp.example.com` is a **placeholder**, not a service provided by this project,
-> and Claude does not replace it automatically. Deploy the relay first, then
-> replace it everywhere with the public hostname you configured as `MCP_HOST`.
-> For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector URL is
-> `https://phone.yourdomain.com/mcp`.
+> `mcp.example.com` in these docs is a **placeholder**, not a service provided by
+> this project, and Claude does not replace it automatically. Deploy the relay
+> first, then replace it everywhere with the public hostname you configured as
+> `MCP_HOST`. For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector
+> URL is `https://phone.yourdomain.com/mcp`.
+>
+> The APK and `.env.example` in this repo default to the maintainer's relay
+> (`mcp.turin.my`). That relay will not accept your `DEVICE_TOKEN`, so point the
+> agent at your own — via the app's Relay URL field, the `--es relay` provisioning
+> extra, or by editing `Prefs.kt` before building.
 
-> 📖 **Full walkthrough** — deploy, install on the phone, connect every client
+> 📖 **Full walkthrough** — deploy, install on Android, connect every client
 > (incl. the Claude mobile app via OAuth), tool reference, recipes,
 > troubleshooting, and the threat model: **[docs/USAGE.md](docs/USAGE.md)**.
+>
+> ⌚ **Wear OS** — installation and watch-specific behavior: **[docs/WEAR_OS.md](docs/WEAR_OS.md)**.
+>
+> 🔐 **Official APK signing** — required GitHub Secrets and release signing behavior: **[docs/SIGNING.md](docs/SIGNING.md)**.
+
+## Two hostnames
+
+The deployment splits along a trust boundary — one process each, so the public
+hostname has no route to the relay even if a proxy rule is wrong:
+
+| Host | Serves | Auth |
+|---|---|---|
+| `MCP_HOST` (private) | `POST /mcp`, `WS /agent`, `/healthz`, OAuth | `AI_TOKEN` / `DEVICE_TOKEN` |
+| `PUBLIC_MCP_HOST` (public) | `GET /api/version/release`, `GET /agent.apk` | none — no secrets, no device info |
+
+Neither container ships an APK: both fetch the signed build from the newest GitHub
+release and cache it. Pushing a `v*` tag is the whole release process.
+
+Shell access lives entirely on the private host. The public one only answers
+"which agent build is current" and hands out that APK.
 
 ## Components
 
 - `server/` — Node/TS. Streamable-HTTP **MCP server** (`run_shell`, `list_devices`)
-  + **WS relay** the phone connects to. Bearer auth for AIs, shared token for the phone.
+  + **WS relay** the Android device connects to. Bearer auth for AIs, shared token
+  for the device. A second entrypoint (`dist/public.js`) serves the public host.
 - `app/` — Android (Kotlin). One installable **APK**: binds a Shizuku `UserService`
   to run commands as shell uid, a foreground service holds the outbound WS, auto-starts on boot.
 
@@ -40,6 +67,13 @@ cd server && npm install && npx tsc && node test/smoke.mjs
 # APK (Android SDK + Gradle run inside Docker; host stays clean)
 cd app && ./build-apk.sh        # -> app/rish-mcp-agent.apk
 ```
+
+### GitHub Actions APKs
+
+Pull requests and development branches build a disposable-signed test APK.
+A push to the repository's default `master` branch builds the **official APK** using the persistent Android signing key stored in GitHub Actions secrets, verifies the APK signature, generates a SHA-256 checksum, and uploads both as the `rish-mcp-official-<commit-sha>` artifact for 90 days.
+
+The official job deliberately fails when signing secrets are missing; it never silently publishes an APK signed with a new/generated key. See [docs/SIGNING.md](docs/SIGNING.md).
 
 ## Deploy (relay+MCP)
 
@@ -56,7 +90,7 @@ Deploy `docker-compose.yml` as a Dokploy **Compose** app with
 Cloudflare A record such as `phone.yourdomain.com → <server-ip>`
 (orange/proxied is fine for HTTPS+WSS over :443).
 
-## Install on phone
+## Install on Android
 
 Fully **headless** when you already have a Shizuku shell (`rish` / `adb`). `-g`
 auto-grants Shizuku's `API_V23` permission, and `am` extras provision the agent —
@@ -108,20 +142,23 @@ claude mcp add --transport http phone https://mcp.example.com/mcp \
 
 Then the AI has two tools:
 
-- `list_devices()` — phones currently connected to the relay
+- `list_devices()` — Android devices currently connected to the relay, with each
+  device's agent version and an `updateAvailable` flag when it is older than the
+  APK the relay serves (`GET /api/version/release` on either host reports that
+  version, parsed live from the APK itself)
 - `run_shell({cmd, deviceId?, timeoutMs?})` — run a command as shell uid;
   returns stdout, stderr and the exit code. `deviceId` is optional when
-  exactly one phone is online.
+  exactly one device is online.
 
 ### Example prompts
 
 Once connected, just ask in natural language — the AI translates to shell:
 
-> "What's my phone's battery level?" → `dumpsys battery`
-> "Is my phone's screen on?" → `dumpsys power | grep -i wakefulness`
+> "What's my device's battery level?" → `dumpsys battery`
+> "Is my device's screen on?" → `dumpsys power | grep -i wakefulness`
 > "What apps did I install this month?" → `pm list packages -3 …`
 > "Take a screenshot and describe it" → `screencap -p /sdcard/…` + pull
-> "Silence my phone" / "open Maps" → `cmd notification set_dnd on` / `am start …`
+> "Silence my device" / "open Maps" → `cmd notification set_dnd on` / `am start …`
 
 Anything an `adb shell` (uid 2000) can do works: `pm`, `am`, `dumpsys`,
 `settings`, `cmd`, `input`, `screencap`, `logcat`, file access under
@@ -131,7 +168,8 @@ Anything an `adb shell` (uid 2000) can do works: `pm`, `am`, `dumpsys`,
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1}   ← devices ≥ 1 means the phone is connected
+# {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+#                    ↑ devices ≥ 1 means an Android device is connected
 
 curl -s https://mcp.example.com/mcp \
   -H "Authorization: Bearer $AI_TOKEN" \
@@ -172,7 +210,7 @@ Static bearer auth still works in parallel, so **Claude Code** / **API** /
 
 ## Security notes
 
-- This grants shell-level remote execution on the phone to anyone holding `AI_TOKEN`.
+- This grants shell-level remote execution on the Android device to anyone holding `AI_TOKEN`.
   Treat it like an SSH private key. Rotate by changing env + restarting the stack.
-- The phone only trusts the relay it dials; it never accepts inbound connections.
+- The Android device only trusts the relay it dials; it never accepts inbound connections.
 - Scope is the **owner's own device** for personal automation.
