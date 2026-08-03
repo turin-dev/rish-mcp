@@ -142,6 +142,37 @@ try {
   });
   assert(replay.status === 400, "auth code cannot be replayed");
 
+  // --- second device: handheld defaults + multi-device routing ---
+  // No kind= param at all, so this also covers the "android" fallback and the
+  // coercion of a bogus form factor.
+  const phone = new WebSocket(`ws://127.0.0.1:${PORT}/agent?token=${DEVICE_TOKEN}&deviceId=test-phone&name=FakePhone&sdk=36&kind=bogus`);
+  await new Promise((res, rej) => { phone.once("open", res); phone.once("error", rej); });
+  phone.on("message", (raw) => {
+    const m = JSON.parse(raw.toString());
+    if (m.type !== "exec") return;
+    phone.send(JSON.stringify({ type: "result", reqId: m.reqId, code: 0, stdout: "hello-from-phone\n", stderr: "", durationMs: 1 }));
+  });
+  await sleep(200);
+
+  const multi = new Client({ name: "smoke-multi", version: "1.0.0" });
+  await multi.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${AI_TOKEN}` } },
+  }));
+
+  const both = JSON.parse((await multi.callTool({ name: "list_devices", arguments: {} })).content[0].text);
+  assert(both.length === 2, "list_devices shows both devices");
+  assert(both.find((d) => d.id === "test-watch")?.kind === "watch", "watch keeps kind=watch");
+  assert(both.find((d) => d.id === "test-phone")?.kind === "android", "unknown kind coerced to android");
+
+  const ambiguous = await multi.callTool({ name: "run_shell", arguments: { cmd: "echo x" } });
+  assert(ambiguous.isError === true && ambiguous.content[0].text.includes("deviceId"),
+    "run_shell without deviceId is rejected when several devices are online");
+
+  const routed = await multi.callTool({ name: "run_shell", arguments: { cmd: "echo hi", deviceId: "test-phone" } });
+  assert(routed.content[0].text.includes("hello-from-phone"), "run_shell routes to the requested deviceId");
+
+  await multi.close();
+  phone.close();
   agent.close();
 } catch (e) {
   console.error("THREW:", e);
