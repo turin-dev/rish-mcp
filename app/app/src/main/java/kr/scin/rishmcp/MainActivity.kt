@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Headless provisioning from a shell:
      *   am start -n kr.scin.rishmcp/.MainActivity \
-     *     --es relay wss://mcp.example.com/agent --es token <DEVICE_TOKEN> --ez autostart true
+     *     --es relay wss://rish-mcp.turin.my/agent --es token <DEVICE_TOKEN> --ez autostart true
      */
     private fun handleProvisioning(intent: Intent?) {
         intent ?: return

@@ -15,11 +15,16 @@ The Android device has **zero inbound** exposure (works behind CGNAT). No VPN, n
 The same APK supports normal Android phones/tablets and Wear OS watches.
 
 > [!IMPORTANT]
-> `mcp.example.com` is a **placeholder**, not a service provided by this project,
-> and Claude does not replace it automatically. Deploy the relay first, then
-> replace it everywhere with the public hostname you configured as `MCP_HOST`.
-> For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector URL is
-> `https://phone.yourdomain.com/mcp`.
+> `mcp.example.com` in these docs is a **placeholder**, not a service provided by
+> this project, and Claude does not replace it automatically. Deploy the relay
+> first, then replace it everywhere with the public hostname you configured as
+> `MCP_HOST`. For example, if `MCP_HOST=phone.yourdomain.com`, the Claude connector
+> URL is `https://phone.yourdomain.com/mcp`.
+>
+> The APK and `.env.example` in this repo default to the maintainer's gateway
+> (`rish-mcp.turin.my`). That gateway will not accept your `DEVICE_TOKEN`, so point
+> the agent at your own relay — via the app's Relay URL field, the `--es relay`
+> provisioning extra, or by editing `Prefs.kt` before building.
 
 > 📖 **Full walkthrough** — deploy, install on Android, connect every client
 > (incl. the Claude mobile app via OAuth), tool reference, recipes,
@@ -120,7 +125,9 @@ claude mcp add --transport http phone https://mcp.example.com/mcp \
 
 Then the AI has two tools:
 
-- `list_devices()` — Android devices currently connected to the relay
+- `list_devices()` — Android devices currently connected to the relay, with each
+  device's agent version and an `updateAvailable` flag when it is older than the
+  APK the relay serves
 - `run_shell({cmd, deviceId?, timeoutMs?})` — run a command as shell uid;
   returns stdout, stderr and the exit code. `deviceId` is optional when
   exactly one device is online.
@@ -143,7 +150,8 @@ Anything an `adb shell` (uid 2000) can do works: `pm`, `am`, `dumpsys`,
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1}   ← devices ≥ 1 means an Android device is connected
+# {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
+#                    ↑ devices ≥ 1 means an Android device is connected
 
 curl -s https://mcp.example.com/mcp \
   -H "Authorization: Bearer $AI_TOKEN" \
