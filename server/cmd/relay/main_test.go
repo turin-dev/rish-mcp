@@ -10,15 +10,20 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/turin-dev/rish-mcp/server/internal/oauth"
 	"github.com/turin-dev/rish-mcp/server/internal/relay"
 )
+
+func testOAuthProvider() *oauth.Provider {
+	return oauth.NewProvider(oauth.Config{PublicURL: "http://test.invalid", AIToken: "ai-token"})
+}
 
 // TestRunShellRoundTrip drives the whole skeleton end to end, mirroring
 // before/server/test/smoke.mjs: a fake Android agent dials /agent, then an
 // MCP client lists devices and runs a command through /mcp.
 func TestRunShellRoundTrip(t *testing.T) {
 	reg := relay.NewRegistry()
-	mux := newMux(reg, "ai-token", "device-token", 5*time.Second, 30*time.Second)
+	mux := newMux(reg, testOAuthProvider(), "ai-token", "device-token", 5*time.Second, 30*time.Second)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -50,7 +55,7 @@ func TestRunShellRoundTrip(t *testing.T) {
 
 func TestMCPRequiresBearer(t *testing.T) {
 	reg := relay.NewRegistry()
-	mux := newMux(reg, "ai-token", "device-token", 5*time.Second, 30*time.Second)
+	mux := newMux(reg, testOAuthProvider(), "ai-token", "device-token", 5*time.Second, 30*time.Second)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -67,7 +72,7 @@ func TestMCPRequiresBearer(t *testing.T) {
 
 func TestRunShellNoDeviceConnected(t *testing.T) {
 	reg := relay.NewRegistry()
-	mux := newMux(reg, "ai-token", "device-token", 5*time.Second, 30*time.Second)
+	mux := newMux(reg, testOAuthProvider(), "ai-token", "device-token", 5*time.Second, 30*time.Second)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

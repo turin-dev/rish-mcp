@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/turin-dev/rish-mcp/server/internal/mcp"
+	"github.com/turin-dev/rish-mcp/server/internal/oauth"
 	"github.com/turin-dev/rish-mcp/server/internal/relay"
 )
 
@@ -23,27 +24,36 @@ func main() {
 	deviceToken := requireEnv("DEVICE_TOKEN")
 	defaultTimeout := envDurationMs("DEFAULT_TIMEOUT_MS", 60_000)
 	maxTimeout := envDurationMs("MAX_TIMEOUT_MS", 600_000)
+	publicURL := envOr("PUBLIC_URL", "http://localhost:"+port)
 
 	reg := relay.NewRegistry()
-	mux := newMux(reg, aiToken, deviceToken, defaultTimeout, maxTimeout)
+	oauthProvider := oauth.NewProvider(oauth.Config{PublicURL: publicURL, AIToken: aiToken})
+	mux := newMux(reg, oauthProvider, aiToken, deviceToken, defaultTimeout, maxTimeout)
 
 	log.Printf("rish-mcp relay listening on :%s", port)
-	log.Printf("  MCP (AI):  POST /mcp   (Authorization: Bearer AI_TOKEN)")
+	log.Printf("  MCP (AI):  POST /mcp   (Authorization: Bearer AI_TOKEN, or an OAuth access token)")
+	log.Printf("  OAuth:     %s/oauth/authorize (claude.ai connectors)", publicURL)
 	log.Printf("  Relay:     WS   /agent?token=DEVICE_TOKEN&deviceId=...&kind=android|watch")
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// newMux wires the registry, MCP server, and HTTP routes together. Split out
-// from main() so tests can spin up the whole thing against an httptest server
-// without a real listening port or env vars.
-func newMux(reg *relay.Registry, aiToken, deviceToken string, defaultTimeout, maxTimeout time.Duration) *http.ServeMux {
+// newMux wires the registry, MCP server, OAuth provider, and HTTP routes
+// together. Split out from main() so tests can spin up the whole thing
+// against an httptest server without a real listening port or env vars.
+func newMux(
+	reg *relay.Registry,
+	oauthProvider *oauth.Provider,
+	aiToken, deviceToken string,
+	defaultTimeout, maxTimeout time.Duration,
+) *http.ServeMux {
 	mcpServer := buildMCPServer(reg, defaultTimeout, maxTimeout)
 	mux := http.NewServeMux()
+	oauthProvider.RegisterRoutes(mux)
 	mux.HandleFunc("/healthz", healthzHandler(reg))
 	mux.Handle("/agent", relay.HandleAgent(reg, deviceToken))
-	mux.Handle("/mcp", requireBearer(aiToken, mcpHandler(mcpServer)))
+	mux.Handle("/mcp", requireBearer(aiToken, oauthProvider, mcpHandler(mcpServer)))
 	return mux
 }
 
@@ -163,13 +173,20 @@ func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg 
 	_ = json.NewEncoder(w).Encode(mcp.Response{JSONRPC: "2.0", ID: id, Error: &mcp.RPCError{Code: code, Message: msg}})
 }
 
-// requireBearer checks the static AI_TOKEN. OAuth support is a later
-// roadmap step (docs/DESIGN.md §8) — this is intentionally bearer-only.
-func requireBearer(token string, next http.HandlerFunc) http.HandlerFunc {
+// requireBearer accepts the static AI_TOKEN or a valid OAuth access token
+// (claude.ai custom connectors don't support static bearer tokens, hence the
+// OAuth layer — see docs/DESIGN.md §4). A 401 carries WWW-Authenticate so an
+// OAuth-capable client can discover the flow via RFC 9728.
+func requireBearer(token string, oauthProvider *oauth.Provider, next http.HandlerFunc) http.HandlerFunc {
 	const prefix = "Bearer "
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != token {
+		var presented string
+		if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+			presented = auth[len(prefix):]
+		}
+		if presented != token && !oauthProvider.VerifyAccessToken(presented) {
+			w.Header().Set("WWW-Authenticate", oauthProvider.WWWAuthenticate())
 			writeJSONRPCError(w, nil, -32001, "unauthorized", http.StatusUnauthorized)
 			return
 		}
