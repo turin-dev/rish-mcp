@@ -42,6 +42,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // Relay WebSocket client (ConnectionManager).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Provisioning UI (MainActivity).
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 
     // On-device ADB client (pairing + connect + shell), replacing Shizuku.
     // See docs/DESIGN.md §2.1 and §3.1.

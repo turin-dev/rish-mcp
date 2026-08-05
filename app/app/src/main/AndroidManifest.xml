@@ -16,13 +16,21 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!--
-      MainActivity (pairing + provisioning UI) doesn't exist yet, so there's
-      still no way to flip Prefs.enabled/relayUrl/deviceToken/adbHost/adbPort
-      from the device's screen. AgentService/BootReceiver/ConnectionManager
-      are otherwise fully wired (docs/DESIGN.md §2.1).
-    -->
-    <application android:allowBackup="false">
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.RishMcp">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".AgentService"
