@@ -174,18 +174,36 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 
 - **Go MCP 생태계 미성숙**: 공식 SDK가 없어 MCP JSON-RPC, relay 프로토콜, OAuth를
   전부 자체 구현해야 함 — 개인 프로젝트 규모 대비 투자가 큰 편임을 인지하고 진행
+  (구현 완료: `internal/mcp`, `internal/oauth`)
 - **Android 11 미만 USB 페어링**: PC + adb가 실제로 필요하고, 재부팅 후 유지 여부는
   ROM에 따라 다름 — 실기기 검증 전까지는 가정으로 취급
-- **FCM 폴백 폴링 주기**: 아직 수치 미확정 (TBD) — 임의로 확정하지 않고 구현 단계에서
-  실측 후 결정
+- **FCM 하이브리드 연결이 통째로 보류 상태**: Firebase 프로젝트가 없어 §3.2/§8의
+  저사양 기기 웨이크업 경로를 구현할 수 없음. 재개하려면: (a) Firebase 프로젝트
+  생성, (b) `google-services.json`을 앱에 추가 + FCM SDK 의존성, (c) relay가 FCM
+  발신 크리덴셜(서비스 계정 키)로 기기를 깨우는 서버측 로직, (d)
+  `ConnectionManager`에 이미 표시해둔 자리에 `FcmWakeReceiver.kt` 구현. 그 전까지
+  모든 기기가 상시 WS를 씀
+- **Android 앱은 실기기 미검증**: `AdbShellClient`/`ConnectionManager`/
+  `MainActivity`는 컴파일·유닛 테스트(순수 로직 부분만)는 통과했지만, 실제 무선
+  페어링·연결·명령 실행은 이 개발 환경에 연결된 Android 기기가 없어 검증하지 못함
+- **Go 서버 배포 구성 미완성**: `server/Dockerfile`로 두 바이너리 이미지는 빌드
+  되지만, 리버스 프록시/docker-compose 설정은 기존 `before/docker-compose.yml`
+  (Traefik 기반)을 그대로 재현하지 않았음
 
 ---
 ## 8. 구현 로드맵 (제안 순서)
 
-1. Go relay 골격 + MCP 툴 2개(`run_shell`, `list_devices`) + 정적 bearer 인증
-2. 앱 `AdbShellClient` (Android 11+ 무선 페어링 경로 우선)
-3. OAuth 레이어 이식
-4. 저사양 기기 하이브리드 연결(`ConnectionManager` + FCM)
-5. 공식 버전 서버
-6. Android 11 미만 USB 경로
-7. 통합 문서화 (README, USAGE 재작성)
+1. ✅ Go relay 골격 + MCP 툴 2개(`run_shell`, `list_devices`) + 정적 bearer 인증
+2. ✅ 앱 `AdbShellClient` (Android 11+ 무선 페어링 경로 우선) — libadb-android 기반,
+   `ConnectionManager`/`AgentService`/`MainActivity` 페어링 UI까지 배선 완료.
+   실기기 검증은 아직
+3. ✅ OAuth 레이어 이식 — `internal/oauth`, `/mcp`이 정적 bearer와 OAuth access
+   token을 병행 수용
+4. ⛔ 저사양 기기 하이브리드 연결(`ConnectionManager` + FCM) — **보류** (§7 참고,
+   Firebase 프로젝트 필요)
+5. ✅ 공식 버전 서버 — `cmd/publicserver` (`/healthz`, `/api/version/release`,
+   `/agent.apk`), GitHub 릴리즈 폴링/캐싱(`internal/release`)
+6. ✅ (코드 기준) Android 11 미만 USB 경로 — `MainActivity`/`Prefs.adbPort`가 이미
+   host-agnostic이라 pre-11 사용자는 PC+adb로 얻은 포트만 입력하면 됨. PC+adb
+   tcpip 브리지 자체는 사용자가 수행하는 수동 단계라 앱 코드로 검증할 대상이 아님
+7. ✅ 통합 문서화 — `README.md`, `docs/USAGE.md` 재작성, 이 로드맵 갱신
