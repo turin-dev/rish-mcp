@@ -16,6 +16,10 @@ android {
         versionName = "0.1.0"
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     // Sideloaded personal app — skip the release lint gate (see before/app for
     // the original rationale; it also tries to auto-install SDK bits into a
     // read-only image SDK dir under the Docker build).
@@ -36,6 +40,8 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Relay WebSocket client (ConnectionManager).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // On-device ADB client (pairing + connect + shell), replacing Shizuku.
     // See docs/DESIGN.md §2.1 and §3.1.
