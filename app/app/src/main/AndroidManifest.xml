@@ -49,5 +49,15 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Low-spec device wake path (docs/DESIGN.md §3.2) — inert until a
+             real google-services.json/Firebase project exists (§7). -->
+        <service
+            android:name=".FcmWakeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

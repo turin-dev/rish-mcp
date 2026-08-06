@@ -1,0 +1,27 @@
+# IDE
+.idea/
+
+# Android app
+app/.gradle/
+app/.dockerhome/
+app/build/
+app/app/build/
+app/release.keystore
+app/rish-mcp-agent.apk
+app/build.log
+app/.android/
+app/analytics.settings
+app/.kotlin/
+
+# Firebase config — never commit the real one (docs/DESIGN.md §3.2/§7).
+# app/app/google-services.json.example stays committed as the template.
+app/app/google-services.json
+
+# Go server build output
+server/relay
+server/publicserver
+
+# Secrets
+.env
+*.env
+!.env.example
