@@ -58,8 +58,11 @@ dependencies {
     // Harmless to depend on ahead of time: FcmWakeReceiver only does
     // anything once a real google-services.json makes the plugin below
     // active and Firebase actually initializes.
+    // Note: firebase-messaging-ktx is deprecated (its Kotlin extensions were
+    // merged into the base artifact) and has no version mapping in recent
+    // BoM releases — use firebase-messaging directly.
     implementation(platform("com.google.firebase:firebase-bom:34.17.0"))
-    implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("com.google.firebase:firebase-messaging")
 
     testImplementation("junit:junit:4.13.2")
 }
