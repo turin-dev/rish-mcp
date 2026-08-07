@@ -15,6 +15,8 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // --- minimal ANSI styling (no TUI framework: this has to run correctly
@@ -73,7 +76,20 @@ func step(n int, title string) {
 
 var stdin = bufio.NewReader(os.Stdin)
 
+// nonInteractive: for an agent bootstrapping a fresh machine (-yes / -y /
+// RISH_MCP_YES=1). -action picks the menu entry; every prompt below takes
+// its default instead of blocking on stdin -- see prompt().
+var nonInteractive bool
+
 func prompt(label string) string {
+	if nonInteractive {
+		// promptDefault/promptYesNo both route through here and treat ""
+		// as "take the default"; every bare prompt() call site already
+		// treats "" as "skip this optional value" -- so short-circuiting
+		// here alone makes the whole flow non-blocking.
+		fmt.Println(label + " " + dim("(non-interactive, skipped)"))
+		return ""
+	}
 	fmt.Print(label + " ")
 	line, err := stdin.ReadString('\n')
 	if err != nil {
@@ -107,36 +123,107 @@ func promptYesNo(label string, def bool) bool {
 // --- main flow ---
 
 func main() {
-	serverURL := flag.String("server", os.Getenv("RISH_MCP_SERVER"), "base URL of the official rish-mcp version server (optional; if unset, you'll build locally)")
+	defaultServer := "https://rish-mcp.turin.my"
+	if v := os.Getenv("RISH_MCP_SERVER"); v != "" {
+		defaultServer = v
+	}
+	serverURL := flag.String("server", defaultServer, "base URL of the official rish-mcp version server (pass an empty string to force a local build instead)")
+	yes := flag.Bool("yes", false, "non-interactive: take every prompt's default, run one -action and exit (for agents/scripts)")
+	flag.BoolVar(yes, "y", false, "shorthand for -yes")
+	action := flag.String("action", "setup", "which menu entry to run in -yes mode: setup, apk, or relay")
 	flag.Parse()
+	nonInteractive = *yes || os.Getenv("RISH_MCP_YES") == "1"
 
 	fmt.Println(heading("rish-mcp setup"))
-	fmt.Println(dim("Gets the Android agent onto your device: adb, the APK, and adb install."))
-	fmt.Println(dim("Wireless pairing itself happens in the app afterwards -- see the last step."))
+	fmt.Println(dim("adb + pairing + build + relay, all from one place."))
 
+	for {
+		var choice string
+		if nonInteractive {
+			switch *action {
+			case "setup":
+				choice = "1"
+			case "apk":
+				choice = "2"
+			case "relay":
+				choice = "3"
+			default:
+				fmt.Println(bad("-action must be one of: setup, apk, relay"))
+				os.Exit(1)
+			}
+			fmt.Println(dim("(non-interactive) → action=" + *action))
+		} else {
+			fmt.Println()
+			fmt.Println(heading("What do you want to do?"))
+			fmt.Println("  1) Full device setup -- adb, pairing, install the app")
+			fmt.Println("  2) Just build/download the APK")
+			fmt.Println("  3) Start a relay server")
+			fmt.Println("  4) Exit")
+			choice = promptDefault("Choice", "1")
+		}
+
+		var err error
+		switch choice {
+		case "1":
+			err = runDeviceSetup(*serverURL)
+		case "2":
+			err = runBuildAPKOnly(*serverURL)
+		case "3":
+			err = runStartRelay()
+		case "4":
+			return
+		default:
+			fmt.Println(bad("not a valid choice"))
+			continue
+		}
+		if err != nil {
+			fmt.Println(bad(err.Error()))
+			if nonInteractive {
+				os.Exit(1)
+			}
+		}
+
+		// Non-interactive mode does exactly the one -action and stops --
+		// there's nobody to ask "back to the menu?".
+		if nonInteractive {
+			return
+		}
+		if !promptYesNo("Back to the menu?", true) {
+			return
+		}
+	}
+}
+
+func runDeviceSetup(serverURL string) error {
 	adbPath, err := ensureADB()
 	if err != nil {
-		fmt.Println(bad("couldn't get adb: " + err.Error()))
-		os.Exit(1)
+		return fmt.Errorf("couldn't get adb: %w", err)
 	}
 	fmt.Println(good("adb ready: " + adbPath))
 
 	// Fail fast: if there's no way to get an APK later, don't waste the
 	// user's time on device setup first.
-	if *serverURL == "" {
+	if serverURL == "" {
 		if _, err := exec.LookPath("docker"); err != nil {
 			fmt.Println(bad("no way to get an APK: Docker isn't installed, and no -server / RISH_MCP_SERVER is set."))
 			fmt.Println(dim("Either install Docker Desktop (used to build the app without needing the Android SDK locally),"))
 			fmt.Println(dim("or pass -server <url> to download a prebuilt APK instead."))
-			os.Exit(1)
+			return nil
 		}
 	}
 
 	step(1, "connect your device")
 	fmt.Println("Plug the phone in over USB and enable USB debugging (Settings → Developer")
 	fmt.Println("options → USB debugging), or make sure it's already reachable over adb.")
-	for {
-		prompt(dim("press enter once it's connected"))
+	deviceFound := false
+	for attempt := 0; !nonInteractive || attempt < 15; attempt++ { // ~30s of polling, not a busy-loop, in agent mode
+		if nonInteractive {
+			if attempt > 0 {
+				time.Sleep(2 * time.Second)
+			}
+		} else {
+			prompt(dim("press enter once it's connected"))
+		}
 		devices, err := listDevices(adbPath)
 		if err != nil {
 			fmt.Println(bad(err.Error()))
@@ -147,7 +234,11 @@ func main() {
 			continue
 		}
 		fmt.Println(good(fmt.Sprintf("found device: %s", devices[0])))
+		deviceFound = true
 		break
+	}
+	if !deviceFound {
+		return fmt.Errorf("no device showed up on `adb devices` after 15 attempts (non-interactive mode doesn't wait forever)")
 	}
 
 	step(2, "Android version")
@@ -158,25 +249,22 @@ func main() {
 		bridgePort = promptDefault("TCP port for the adb bridge", "5555")
 		out, err := exec.Command(adbPath, "tcpip", bridgePort).CombinedOutput()
 		if err != nil {
-			fmt.Println(bad("adb tcpip failed: " + strings.TrimSpace(string(out))))
-			os.Exit(1)
+			return fmt.Errorf("adb tcpip failed: %s", strings.TrimSpace(string(out)))
 		}
 		fmt.Println(good(fmt.Sprintf("adbd now listening on port %s -- you can unplug the USB cable", bridgePort)))
 	}
 
 	step(3, "get the APK")
-	apkPath, err := acquireAPK(*serverURL)
+	apkPath, err := acquireAPK(serverURL)
 	if err != nil {
-		fmt.Println(bad(err.Error()))
-		os.Exit(1)
+		return err
 	}
 	fmt.Println(good("APK ready: " + apkPath))
 
 	step(4, "install")
 	out, err := exec.Command(adbPath, "install", "-r", apkPath).CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "Success") {
-		fmt.Println(bad("adb install failed:\n" + string(out)))
-		os.Exit(1)
+		return fmt.Errorf("adb install failed:\n%s", string(out))
 	}
 	fmt.Println(good("installed"))
 
@@ -220,6 +308,121 @@ func main() {
 	}
 	fmt.Println()
 	fmt.Println(good("done"))
+	return nil
+}
+
+// runBuildAPKOnly is runDeviceSetup's step 3 on its own, for someone who
+// just wants an APK (e.g. to hand-install, or to check a build works)
+// without going through pairing.
+func runBuildAPKOnly(serverURL string) error {
+	apkPath, err := acquireAPK(serverURL)
+	if err != nil {
+		return err
+	}
+	fmt.Println(good("APK ready: " + apkPath))
+	return nil
+}
+
+// runStartRelay launches server/cmd/relay in the foreground, streaming its
+// logs, until the user kills it (Ctrl+C) or it exits on its own. AI_TOKEN/
+// DEVICE_TOKEN are required by the relay (see cmd/relay/main.go) -- offers
+// to generate random ones rather than requiring the user already have some.
+const relayImage = "ghcr.io/turin-dev/rish-mcp-relay:latest"
+
+func runStartRelay() error {
+	// No local checkout is fine -- we fall back to the prebuilt image
+	// below instead of requiring one just to run the relay.
+	repoRoot, _ := findRepoRoot()
+
+	aiToken := os.Getenv("AI_TOKEN")
+	if aiToken == "" {
+		if promptYesNo("No AI_TOKEN set. Generate a random one?", true) {
+			aiToken = randomToken()
+			fmt.Println(dim("AI_TOKEN=" + aiToken))
+		} else {
+			aiToken = prompt("AI_TOKEN:")
+		}
+	}
+	deviceToken := os.Getenv("DEVICE_TOKEN")
+	if deviceToken == "" {
+		if promptYesNo("No DEVICE_TOKEN set. Generate a random one?", true) {
+			deviceToken = randomToken()
+			fmt.Println(dim("DEVICE_TOKEN=" + deviceToken))
+		} else {
+			deviceToken = prompt("DEVICE_TOKEN:")
+		}
+	}
+	if aiToken == "" || deviceToken == "" {
+		return fmt.Errorf("AI_TOKEN and DEVICE_TOKEN are both required")
+	}
+	port := promptDefault("Port", "8080")
+
+	env := append(os.Environ(),
+		"AI_TOKEN="+aiToken,
+		"DEVICE_TOKEN="+deviceToken,
+		"PORT="+port,
+	)
+
+	var cmd *exec.Cmd
+	if repoRoot != "" {
+		serverDir := filepath.Join(repoRoot, "server")
+		if _, err := exec.LookPath("go"); err == nil {
+			fmt.Println(dim("go run ./cmd/relay"))
+			cmd = exec.Command("go", "run", "./cmd/relay")
+			cmd.Dir = serverDir
+		} else if _, err := exec.LookPath("docker"); err == nil {
+			fmt.Println(dim("docker build --target relay -t rishmcp-relay " + serverDir))
+			build := exec.Command("docker", "build", "--target", "relay", "-t", "rishmcp-relay", ".")
+			build.Dir = serverDir
+			build.Stdout = os.Stdout
+			build.Stderr = os.Stderr
+			if err := build.Run(); err != nil {
+				return fmt.Errorf("docker build failed: %w", err)
+			}
+			cmd = exec.Command("docker", "run", "--rm", "-p", port+":"+port,
+				"-e", "AI_TOKEN="+aiToken, "-e", "DEVICE_TOKEN="+deviceToken, "-e", "PORT="+port,
+				"rishmcp-relay")
+		}
+	}
+
+	if cmd == nil {
+		// No local checkout (or no go/docker to build it with) -- fall back
+		// to the prebuilt image, which needs neither.
+		if _, err := exec.LookPath("docker"); err != nil {
+			if repoRoot != "" {
+				return fmt.Errorf("neither go nor docker found -- install one to run the relay")
+			}
+			return fmt.Errorf("no local checkout and docker not found -- install Docker to run the prebuilt relay image, or clone the repo and install Go")
+		}
+		if repoRoot == "" {
+			fmt.Println(dim("No local checkout found -- pulling the prebuilt image instead."))
+		}
+		fmt.Println(dim("docker pull " + relayImage))
+		pull := exec.Command("docker", "pull", relayImage)
+		pull.Stdout = os.Stdout
+		pull.Stderr = os.Stderr
+		if err := pull.Run(); err != nil {
+			return fmt.Errorf("docker pull failed: %w", err)
+		}
+		cmd = exec.Command("docker", "run", "--rm", "-p", port+":"+port,
+			"-e", "AI_TOKEN="+aiToken, "-e", "DEVICE_TOKEN="+deviceToken, "-e", "PORT="+port,
+			relayImage)
+	}
+
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	fmt.Println(good("starting relay on :" + port + " -- Ctrl+C to stop"))
+	return cmd.Run()
+}
+
+func randomToken() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand failing means the OS RNG is broken; nothing sane to fall back to
+	}
+	return hex.EncodeToString(b)
 }
 
 // --- adb discovery / install ---
