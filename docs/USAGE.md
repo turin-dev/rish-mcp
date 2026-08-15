@@ -62,22 +62,50 @@ See [Appendix B](#appendix-b-environment-variables) for the full list. At minimu
 AI_TOKEN=$(openssl rand -hex 32)      # master key for AI clients
 DEVICE_TOKEN=$(openssl rand -hex 24)  # shared secret the phone presents
 PUBLIC_URL=https://mcp.example.com    # external origin, for OAuth metadata/redirects
+TRUSTED_PROXIES=172.18.0.1          # optional proxy IP(s), comma-separated
 ```
 
-### 2.3 Run
+### 2.3 Docker Compose with Traefik (recommended)
+
+The repository includes [`docker-compose.yml`](../docker-compose.yml), which
+builds the two Go Docker targets and keeps the relay trust boundary separate
+from the public APK server. It expects an external Traefik/Dokploy network:
 
 ```bash
-docker run -d -p 8080:8080 \
-  -e AI_TOKEN=$AI_TOKEN -e DEVICE_TOKEN=$DEVICE_TOKEN -e PUBLIC_URL=$PUBLIC_URL \
+cp .env.example .env
+# Edit MCP_HOST and PUBLIC_MCP_HOST, then replace both token values.
+# Generate secrets with: openssl rand -hex 32
+
+docker network create dokploy-network  # once, if it does not exist
+docker compose up -d --build
+```
+
+The relay is routed at `MCP_HOST` and receives `AI_TOKEN`/`DEVICE_TOKEN`.
+Set `TRUSTED_PROXIES` to the direct IP address(es) of the reverse proxy (comma-separated)
+when Traefik/nginx supplies `X-Forwarded-For`; with it empty, the server uses the
+socket peer address and ignores client-supplied forwarding headers. Configure the
+same variable on both relay and publicserver when both sit behind the same proxy.
+The publicserver is routed at `PUBLIC_MCP_HOST`, has no tokens, and serves
+only `/healthz`, `/api/version/release`, and `/agent.apk`. Traefik must expose
+the `websecure` entrypoint and the `letsencrypt` certificate resolver used by
+the labels in the Compose file. The Android WebSocket upgrade is handled by
+Traefik automatically.
+
+### 2.4 Run one container manually
+
+For local testing without Traefik, run the relay directly:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e AI_TOKEN="$AI_TOKEN" -e DEVICE_TOKEN="$DEVICE_TOKEN" \
+  -e PUBLIC_URL="$PUBLIC_URL" \
   rishmcp-relay
 ```
 
-Front it with a reverse proxy that terminates TLS and forwards WebSocket
-upgrades (nginx, Caddy, Traefik — any of them work; the old
-[`before/docker-compose.yml`](../before/docker-compose.yml) used Traefik, not
-yet re-created for this rewrite).
+For production, put a TLS reverse proxy in front of the container (nginx,
+Caddy, or Traefik) and forward WebSocket upgrades on `/agent`.
 
-### 2.4 Verify
+### 2.5 Verify
 
 ```bash
 curl -s https://mcp.example.com/healthz
@@ -263,6 +291,7 @@ Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
 | `AI_TOKEN` | ✅ | — | Bearer secret for AI clients; also the OAuth signing seed |
 | `DEVICE_TOKEN` | ✅ | — | Shared secret the phone presents on `/agent` |
 | `PUBLIC_URL` | for OAuth | `http://localhost:$PORT` | External origin for OAuth metadata/redirects |
+| `TRUSTED_PROXIES` | | empty | Comma-separated proxy IPs allowed to set `X-Forwarded-For` |
 | `PORT` | | `8080` | Listen port |
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
@@ -272,6 +301,7 @@ Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `PORT` | | `8080` | Listen port |
+| `TRUSTED_PROXIES` | | empty | Comma-separated proxy IPs allowed to set `X-Forwarded-For` |
 | `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on `/agent.apk` |
 | `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose latest release supplies the APK |
 | `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |

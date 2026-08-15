@@ -12,12 +12,13 @@ import { createInterface } from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import { stdin, stdout, exit, platform } from "node:process";
 import { spawnSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, chmodSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile as fsCopyFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import AdmZip from "adm-zip";
+import { downloadFile } from "./download.js";
+import { parseArgs } from "./args.js";
 
 // --- styling ---
 
@@ -44,14 +45,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // every yes/no or default-value prompt takes its default instead of
 // waiting on stdin; free-text prompts (tokens, URLs) fall back to "" ,
 // which every call site already treats as "skip this optional bit".
-const cliArgs = process.argv.slice(2);
-const nonInteractive = cliArgs.includes("--yes") || cliArgs.includes("-y") || process.env.RISH_MCP_YES === "1";
-function argValue(flag) {
-  const eqPrefix = flag + "=";
-  const eqForm = cliArgs.find((a) => a.startsWith(eqPrefix));
-  if (eqForm) return eqForm.slice(eqPrefix.length);
-  const i = cliArgs.indexOf(flag);
-  return i !== -1 ? cliArgs[i + 1] : undefined;
+const { cliArgs, help, version, nonInteractive, argValue } = parseArgs(process.argv.slice(2), process.env);
+const packageVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+
+if (help || version) {
+  if (version) console.log(packageVersion);
+  if (help) {
+    console.log(`rish-mcp-setup ${packageVersion}\n\nUsage:\n  npx rish-mcp-setup [options]\n\nOptions:\n  --action <setup|apk|relay>  Run one action in non-interactive mode\n  --server <url>             Download the APK from a version server\n  --yes, -y                  Accept defaults and exit after one action\n  --help, -h                 Show this help\n  --version, -v              Show the package version\n\nEnvironment:\n  RISH_MCP_SERVER             Default version-server URL\n  RISH_MCP_YES=1              Enable non-interactive mode\n\nRequires Node.js >= 18.`);
+  }
+  exit(0);
 }
 
 // Box width is computed off the raw (unstyled) text so ANSI escape codes
@@ -227,34 +229,13 @@ function platformToolsURL() {
   throw new Error(`unsupported OS ${platform} -- install adb yourself and re-run`);
 }
 
-async function downloadFile(url, dest) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  await new Promise((resolve, reject) => {
-    const out = createWriteStream(dest);
-    res.body.pipeTo(
-      new WritableStream({
-        write(chunk) {
-          out.write(chunk);
-        },
-        close() {
-          out.close();
-          resolve();
-        },
-        abort(err) {
-          reject(err);
-        },
-      })
-    ).catch(reject);
-  });
-}
-
 async function downloadPlatformTools(dir) {
   const url = platformToolsURL();
   console.log(dim("downloading " + url));
   const zipPath = path.join(dir, "platform-tools.zip");
   await downloadFile(url, zipPath);
   try {
+    const { default: AdmZip } = await import("adm-zip");
     new AdmZip(zipPath).extractAllTo(dir, true);
   } finally {
     rmSync(zipPath, { force: true });
@@ -615,4 +596,9 @@ async function main() {
   rl.close();
 }
 
-main();
+main().catch((error) => {
+  console.error(bad(error instanceof Error ? error.message : String(error)));
+  intentionalClose = true;
+  rl.close();
+  exit(1);
+});

@@ -5,12 +5,19 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/turin-dev/rish-mcp/server/internal/mcp"
@@ -19,24 +26,89 @@ import (
 )
 
 func main() {
-	port := envOr("PORT", "8080")
-	aiToken := requireEnv("AI_TOKEN")
-	deviceToken := requireEnv("DEVICE_TOKEN")
-	defaultTimeout := envDurationMs("DEFAULT_TIMEOUT_MS", 60_000)
-	maxTimeout := envDurationMs("MAX_TIMEOUT_MS", 600_000)
-	publicURL := envOr("PUBLIC_URL", "http://localhost:"+port)
-
-	reg := relay.NewRegistry()
-	oauthProvider := oauth.NewProvider(oauth.Config{PublicURL: publicURL, AIToken: aiToken})
-	mux := newMux(reg, oauthProvider, aiToken, deviceToken, defaultTimeout, maxTimeout)
-
-	log.Printf("rish-mcp relay listening on :%s", port)
-	log.Printf("  MCP (AI):  POST /mcp   (Authorization: Bearer AI_TOKEN, or an OAuth access token)")
-	log.Printf("  OAuth:     %s/oauth/authorize (claude.ai connectors)", publicURL)
-	log.Printf("  Relay:     WS   /agent?token=DEVICE_TOKEN&deviceId=...&kind=android|watch")
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
 		log.Fatal(err)
 	}
+
+	reg := relay.NewRegistry()
+	oauthProvider := oauth.NewProvider(oauth.Config{PublicURL: cfg.publicURL, AIToken: cfg.aiToken, TrustedProxies: cfg.trustedProxies})
+	mux := newMux(reg, oauthProvider, cfg.aiToken, cfg.deviceToken, cfg.defaultTimeout, cfg.maxTimeout)
+	srv := &http.Server{Addr: ":" + cfg.port, Handler: mux}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	go func() {
+		<-stop
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("relay graceful shutdown failed: %v", err)
+		}
+	}()
+
+	log.Printf("rish-mcp relay listening on :%s", cfg.port)
+	log.Printf("  MCP (AI):  POST /mcp   (Authorization: Bearer AI_TOKEN, or an OAuth access token)")
+	log.Printf("  OAuth:     %s/oauth/authorize (claude.ai connectors)", cfg.publicURL)
+	log.Printf("  Relay:     WS   /agent?token=DEVICE_TOKEN&deviceId=...&kind=android|watch")
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+}
+
+type runtimeConfig struct {
+	port           string
+	aiToken        string
+	deviceToken    string
+	defaultTimeout time.Duration
+	maxTimeout     time.Duration
+	publicURL      string
+	trustedProxies string
+}
+
+func loadConfigFromEnv() (runtimeConfig, error) {
+	port := envOr("PORT", "8080")
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return runtimeConfig{}, fmt.Errorf("PORT must be an integer from 1 to 65535")
+	}
+	aiToken := os.Getenv("AI_TOKEN")
+	if aiToken == "" {
+		return runtimeConfig{}, errors.New("AI_TOKEN is required")
+	}
+	deviceToken := os.Getenv("DEVICE_TOKEN")
+	if deviceToken == "" {
+		return runtimeConfig{}, errors.New("DEVICE_TOKEN is required")
+	}
+	defaultTimeout, err := envDurationMsChecked("DEFAULT_TIMEOUT_MS", 60_000)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	maxTimeout, err := envDurationMsChecked("MAX_TIMEOUT_MS", 600_000)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	if defaultTimeout > maxTimeout {
+		return runtimeConfig{}, errors.New("DEFAULT_TIMEOUT_MS must not exceed MAX_TIMEOUT_MS")
+	}
+	publicURL := envOr("PUBLIC_URL", "http://localhost:"+port)
+	if os.Getenv("PUBLIC_URL") == "" {
+		log.Printf("WARNING: PUBLIC_URL not set; defaulting to %s — set it to the public https URL in production, or OAuth clients (claude.ai connectors) will fail", publicURL)
+	}
+	trustedProxies := envOr("TRUSTED_PROXIES", "")
+	if trustedProxies != "" {
+		for _, ip := range strings.Split(trustedProxies, ",") {
+			ip = strings.TrimSpace(ip)
+			if ip == "" || net.ParseIP(ip) == nil {
+				return runtimeConfig{}, fmt.Errorf("TRUSTED_PROXIES contains invalid IP: %q", ip)
+			}
+		}
+	}
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return runtimeConfig{}, errors.New("PUBLIC_URL must be an absolute http(s) URL")
+	}
+	return runtimeConfig{port: port, aiToken: aiToken, deviceToken: deviceToken, defaultTimeout: defaultTimeout, maxTimeout: maxTimeout, publicURL: publicURL, trustedProxies: trustedProxies}, nil
 }
 
 // newMux wires the registry, MCP server, OAuth provider, and HTTP routes
@@ -51,8 +123,9 @@ func newMux(
 	mcpServer := buildMCPServer(reg, defaultTimeout, maxTimeout)
 	mux := http.NewServeMux()
 	oauthProvider.RegisterRoutes(mux)
+	limiter := relay.NewAgentConnLimiter()
 	mux.HandleFunc("/healthz", healthzHandler(reg))
-	mux.Handle("/agent", relay.HandleAgent(reg, deviceToken))
+	mux.Handle("/agent", relay.HandleAgent(reg, deviceToken, limiter))
 	mux.Handle("/mcp", requireBearer(aiToken, oauthProvider, mcpHandler(mcpServer)))
 	return mux
 }
@@ -103,6 +176,9 @@ func runShellHandler(reg *relay.Registry, defaultTimeout, maxTimeout time.Durati
 		if args.Cmd == "" {
 			return mcp.CallResult{}, errors.New("cmd is required")
 		}
+		if len(args.Cmd) > maxCmdLen {
+			return mcp.CallResult{}, errors.New("cmd is too long")
+		}
 		timeout := defaultTimeout
 		if args.TimeoutMs > 0 {
 			timeout = time.Duration(args.TimeoutMs) * time.Millisecond
@@ -146,14 +222,38 @@ func listDevicesHandler(reg *relay.Registry) func(context.Context, json.RawMessa
 // mcpHandler serves stateless MCP: one JSON-RPC request per POST, no session
 // state kept between calls (mirrors the old server's sessionIdGenerator:
 // undefined stateless mode).
+//
+// The request body is capped at maxMCPBodyBytes: net/http does not limit body
+// sizes by default, and while /mcp is token-gated, an authenticated (or
+// leaked-token) client could otherwise balloon relay memory with one giant
+// JSON payload. MaxBytesReader also turns an oversized body into a clean
+// decode error instead of an unbounded read.
+const maxMCPBodyBytes = 1 << 20 // 1 MiB
+
+// maxCmdLen is the maximum length of a shell command string sent to a device.
+// The execFrame is sent over the WebSocket (which has a 1 MB read limit on the
+// device side), but the relay itself doesn't enforce a cap on the cmd field.
+// A 64 KB limit keeps commands practical while preventing a malicious or
+// buggy client from pushing arbitrarily large strings through the relay.
+const maxCmdLen = 64 << 10 // 64 KiB
+
 func mcpHandler(s *mcp.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONRPCError(w, nil, -32000, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxMCPBodyBytes)
 		var req mcp.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				// Distinguish an oversized body from malformed JSON: a client
+				// that hit the cap gets 413 so it can back off instead of
+				// retrying a request that is fundamentally too big.
+				writeJSONRPCError(w, nil, -32000, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			writeJSONRPCError(w, nil, -32700, "parse error", http.StatusBadRequest)
 			return
 		}
@@ -185,7 +285,7 @@ func requireBearer(token string, oauthProvider *oauth.Provider, next http.Handle
 		if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
 			presented = auth[len(prefix):]
 		}
-		if presented != token && !oauthProvider.VerifyAccessToken(presented) {
+		if !hmac.Equal([]byte(presented), []byte(token)) && !oauthProvider.VerifyAccessToken(presented) {
 			w.Header().Set("WWW-Authenticate", oauthProvider.WWWAuthenticate())
 			writeJSONRPCError(w, nil, -32001, "unauthorized", http.StatusUnauthorized)
 			return
@@ -220,10 +320,22 @@ func requireEnv(key string) string {
 }
 
 func envDurationMs(key string, def int64) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return time.Duration(n) * time.Millisecond
-		}
+	value, err := envDurationMsChecked(key, def)
+	if err != nil {
+		log.Printf("invalid %s: %v; using default", key, err)
+		return time.Duration(def) * time.Millisecond
 	}
-	return time.Duration(def) * time.Millisecond
+	return value
+}
+
+func envDurationMsChecked(key string, def int64) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return time.Duration(def) * time.Millisecond, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer in milliseconds", key)
+	}
+	return time.Duration(n) * time.Millisecond, nil
 }

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,10 +33,11 @@ import (
 const codeTTL = 5 * time.Minute
 
 type Config struct {
-	PublicURL  string // external base URL, no trailing slash, e.g. https://mcp.example.com
-	AIToken    string // the "access key" the owner types on the consent page
-	AccessTTL  time.Duration
-	RefreshTTL time.Duration
+	PublicURL      string // external base URL, no trailing slash, e.g. https://mcp.example.com
+	AIToken        string // the "access key" the owner types on the consent page
+	AccessTTL      time.Duration
+	RefreshTTL     time.Duration
+	TrustedProxies string // comma-separated list of proxy IPs that may set X-Forwarded-For; empty = no proxies trusted
 }
 
 type payloadType string
@@ -68,9 +70,11 @@ type Provider struct {
 	cfg Config
 	key []byte
 
-	mu        sync.Mutex
-	usedCodes map[string]int64 // best-effort single-use enforcement; PKCE is the real guard
-	attempts  map[string]rateEntry
+	mu               sync.Mutex
+	usedCodes        map[string]int64 // best-effort single-use enforcement; PKCE is the real guard
+	usedCodesCleanup int64            // timestamp of last cleanup
+	attempts         map[string]rateEntry
+	attemptsCleanup  int64 // timestamp of last cleanup
 }
 
 func NewProvider(cfg Config) *Provider {
@@ -168,6 +172,16 @@ func (p *Provider) rateLimited(ip string) bool {
 	e, ok := p.attempts[ip]
 	if !ok || e.resetAt < now {
 		p.attempts[ip] = rateEntry{count: 1, resetAt: now + 300}
+		// Opportunistic cleanup: expire old entries and prevent unbounded growth.
+		// Cleanup is a linear scan, so only do it when the map is getting large.
+		if len(p.attempts) > 1000 && now-p.attemptsCleanup > 30 {
+			p.attemptsCleanup = now
+			for k, v := range p.attempts {
+				if v.resetAt < now {
+					delete(p.attempts, k)
+				}
+			}
+		}
 		return false
 	}
 	e.count++
@@ -175,19 +189,41 @@ func (p *Provider) rateLimited(ip string) bool {
 	return e.count > 10
 }
 
-func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if i := strings.IndexByte(fwd, ','); i >= 0 {
-			return strings.TrimSpace(fwd[:i])
+// clientIPWithTrust extracts the client's real IP with explicit trusted proxy support.
+// trustedProxies is a comma-separated list of proxy IPs that may set X-Forwarded-For.
+// If trustedProxies is empty, X-Forwarded-For is ignored (safe default).
+// If trustedProxies is non-empty, X-Forwarded-For is trusted only if RemoteAddr
+// matches one of the trusted proxy IPs.
+func clientIPWithTrust(r *http.Request, trustedProxies string) string {
+	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if remoteIP == "" {
+		remoteIP = r.RemoteAddr
+	}
+
+	// Only trust X-Forwarded-For if the direct connection is from a trusted proxy.
+	if trustedProxies != "" && isTrustedProxyOAuth(remoteIP, trustedProxies) {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			// Take the first (leftmost) IP; it's the original client.
+			if i := strings.IndexByte(fwd, ','); i >= 0 {
+				fwd = fwd[:i]
+			}
+			if ip := strings.TrimSpace(fwd); ip != "" {
+				return ip
+			}
 		}
-		return strings.TrimSpace(fwd)
 	}
-	// RemoteAddr is "ip:port"; strip the port so repeated connections from
-	// the same client (a fresh ephemeral port each time) share one bucket.
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+
+	// Fallback: use the direct connection IP.
+	return remoteIP
+}
+
+func isTrustedProxyOAuth(ip, trustedProxies string) bool {
+	for _, trusted := range strings.Split(trustedProxies, ",") {
+		if strings.TrimSpace(trusted) == ip {
+			return true
+		}
 	}
-	return r.RemoteAddr
+	return false
 }
 
 // --- well-known metadata ------------------------------------------------
@@ -296,7 +332,8 @@ func (p *Provider) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	if p.rateLimited(clientIP(r)) {
+	if ip := clientIPWithTrust(r, p.cfg.TrustedProxies); p.rateLimited(ip) {
+		log.Printf("[oauth] authorize rate limited: %s", ip)
 		http.Error(w, "too many attempts, try again in a few minutes", http.StatusTooManyRequests)
 		return
 	}
@@ -359,10 +396,15 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 	_, used := p.usedCodes[code]
 	if !used {
 		p.usedCodes[code] = pl.ExpiresAt
+		// Opportunistic cleanup: prevent unbounded growth of usedCodes map.
+		// Cleanup scans the map, so only do it when getting large and not too frequently.
 		now := time.Now().Unix()
-		for k, exp := range p.usedCodes {
-			if exp < now {
-				delete(p.usedCodes, k)
+		if len(p.usedCodes) > 1000 && now-p.usedCodesCleanup > 30 {
+			p.usedCodesCleanup = now
+			for k, exp := range p.usedCodes {
+				if exp < now {
+					delete(p.usedCodes, k)
+				}
 			}
 		}
 	}

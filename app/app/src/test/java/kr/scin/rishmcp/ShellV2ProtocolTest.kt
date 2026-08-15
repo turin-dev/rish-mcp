@@ -66,6 +66,57 @@ class ShellV2ProtocolTest {
     }
 
     @Test
+    fun `oversized packet payload is capped and drained to prevent OOM`() {
+        // A single packet with a payload larger than MAX_PACKET_BYTES must not
+        // cause an OOM; the excess is drained and the truncated flag is set.
+        val bigPayload = ByteArray(300_000) { 'x'.code.toByte() }
+        val stream = packets(
+            packet(ID_STDOUT, bigPayload),
+            packet(ID_EXIT, byteArrayOf(0)),
+        )
+
+        val result = ShellV2Protocol.readResult(stream, maxOutputBytes = 1024 * 1024)
+
+        assertEquals(0, result.code)
+        // The payload was capped at 256 KiB, so stdout should be at most that.
+        assertTrue("stdout len = ${result.stdout.length}", result.stdout.length <= 256 * 1024)
+        assertTrue(result.truncated)
+    }
+
+    @Test
+    fun `oversized packet does not corrupt subsequent exit packet`() {
+        // Even when the payload is astronomically large on the wire, the
+        // drain mechanism must keep the stream framing valid so that the
+        // following EXIT packet is still readable.
+        val bigPayload = ByteArray(400_000) { 'y'.code.toByte() }
+        val stream = packets(
+            packet(ID_STDOUT, bigPayload),
+            packet(ID_EXIT, byteArrayOf(42)),
+        )
+
+        val result = ShellV2Protocol.readResult(stream, maxOutputBytes = 1024 * 1024)
+
+        assertEquals(42, result.code)
+        assertTrue(result.truncated)
+    }
+
+    @Test
+    fun `moderately large payload is accepted without truncation`() {
+        // A payload that fits within MAX_PACKET_BYTES must be accepted whole.
+        val payload = ByteArray(100_000) { 'z'.code.toByte() }
+        val stream = packets(
+            packet(ID_STDOUT, payload),
+            packet(ID_EXIT, byteArrayOf(0)),
+        )
+
+        val result = ShellV2Protocol.readResult(stream, maxOutputBytes = 1024 * 1024)
+
+        assertEquals(0, result.code)
+        assertEquals(100_000, result.stdout.length)
+        assertFalse(result.truncated)
+    }
+
+    @Test
     fun `destination wraps the command in a raw v2 shell service string`() {
         assertEquals("shell,v2,raw:id", ShellV2Protocol.destination("id"))
     }

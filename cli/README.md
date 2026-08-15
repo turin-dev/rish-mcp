@@ -21,11 +21,41 @@ One thing it deliberately does **not** do: drive the Android 11+ wireless-pairin
 
 ## Options
 
-```
+```bash
 npx rish-mcp-setup --server https://your-version-server.example.com
 ```
 
 `--server` (or the `RISH_MCP_SERVER` env var) points at a rish-mcp version server to download a prebuilt APK from. Without it, building locally falls back to Docker.
+
+### Non-interactive setup
+
+For scripts or a fresh machine where no one can answer prompts, pass `--yes`
+(or `-y`) and choose the menu action with `--action`:
+
+```bash
+# Full device setup; accepts defaults and uses RISH_MCP_* environment values.
+npx rish-mcp-setup --yes --action setup
+
+# Only acquire an APK.
+npx rish-mcp-setup --yes --action apk
+
+# Start the relay from a checkout, or use the published fallback image.
+npx rish-mcp-setup --yes --action relay
+```
+
+The equivalent environment switch is `RISH_MCP_YES=1`. Use `--help` to see
+all flags, or `--version` to print the installed package version:
+
+```bash
+npx rish-mcp-setup --help
+npx rish-mcp-setup --version
+```
+
+The CLI requires Node.js 18 or newer. Help and version output do not load the
+ZIP extraction dependency or contact the network. Downloads have a two-minute
+timeout and replace cached files only after the new file completes. Non-interactive
+mode still needs the real prerequisites for the selected action: Docker or a local
+APK/build for APK acquisition, and `adb` plus an authorized device for full setup.
 
 ## Also available as a Go binary
 

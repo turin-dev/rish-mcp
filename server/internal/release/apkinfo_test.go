@@ -121,7 +121,7 @@ func buildStartTagChunk(attrs []testAttr) []byte {
 // one versionCode/versionName pair on the root element.
 func buildManifest(versionCode int, versionName string) []byte {
 	strs := buildStringPoolChunk([]string{"versionCode", "versionName", versionName})
-	resMap := buildResourceMapChunk([]uint32{attrVersionCode, attrVersionName})
+	resMap := buildResourceMapChunk([]uint32{AttrVersionCode, AttrVersionName})
 	startTag := buildStartTagChunk([]testAttr{
 		{nameIdx: 0, rawValueIdx: -1, dataType: 0x10, data: uint32(versionCode)},
 		{nameIdx: 1, rawValueIdx: 2, dataType: 0x03, data: 2},

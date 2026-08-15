@@ -151,3 +151,111 @@ func TestSourceLoadsCacheWithoutNetwork(t *testing.T) {
 		t.Errorf("VersionName = %q, want 5.0.0", rel.VersionName)
 	}
 }
+
+// --- tmp-file cleanup tests (Task #8 / #9) ---------------------------------
+
+func TestRemoveStaleTmp(t *testing.T) {
+	t.Run("removes existing tmp file", func(t *testing.T) {
+		dir := t.TempDir()
+		opts := SourceOptions{CacheDir: dir}
+		s := NewSource(opts)
+
+		tmpPath := filepath.Join(dir, "agent.apk.tmp")
+		if err := os.WriteFile(tmpPath, []byte("leftover"), 0o644); err != nil {
+			t.Fatalf("write tmp: %v", err)
+		}
+
+		s.removeStaleTmp()
+
+		if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+			t.Fatal("expected tmp file to be removed")
+		}
+	})
+
+	t.Run("no tmp file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		opts := SourceOptions{CacheDir: dir}
+		s := NewSource(opts)
+
+		// Just must not panic or error.
+		s.removeStaleTmp()
+	})
+
+	t.Run("cache dir missing is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		nonExistent := filepath.Join(dir, "nonexistent")
+		s := NewSource(SourceOptions{CacheDir: nonExistent})
+
+		// Must not panic or error.
+		s.removeStaleTmp()
+	})
+}
+
+func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
+	t.Run("bad APK bytes removes tmp file", func(t *testing.T) {
+		ctx := context.Background()
+		dir := t.TempDir()
+		s := NewSource(SourceOptions{CacheDir: dir})
+
+		// Use a local HTTP server that serves non-APK bytes.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("not an apk at all"))
+		}))
+		defer srv.Close()
+
+		// There should be no tmp file before the call.
+		tmpPath := filepath.Join(dir, "agent.apk.tmp")
+		if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+			t.Fatal("expected no tmp file before download")
+		}
+
+		err := s.downloadAndPublish(ctx, srv.URL+"/bad.apk", "v1.0.0")
+		if err == nil {
+			t.Fatal("expected downloadAndPublish to fail with bad APK bytes")
+		}
+
+		// After the failure, the tmp file must be gone.
+		if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+			t.Fatal("expected tmp file to be cleaned up after failed download")
+		}
+	})
+
+	t.Run("rename failure removes tmp file", func(t *testing.T) {
+		ctx := context.Background()
+		dir := t.TempDir()
+		s := NewSource(SourceOptions{CacheDir: dir})
+
+		// On Linux os.Rename overwrites a read-only target file, so make
+		// agent.apk a non-empty directory instead — renaming a file onto a
+		// directory fails with EISDIR/ENOTDIR, exercising the rename-error path.
+		apkPath := filepath.Join(dir, "agent.apk")
+		if err := os.Mkdir(apkPath, 0o755); err != nil {
+			t.Fatalf("mkdir agent.apk: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(apkPath, "stub"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write stub: %v", err)
+		}
+
+		// Serve valid APK bytes.
+		apkBytes := buildTestApkBytes(t, 1, "1.0.0")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(apkBytes)
+		}))
+		defer srv.Close()
+
+		tmpPath := filepath.Join(dir, "agent.apk.tmp")
+		if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+			t.Fatal("expected no tmp file before download")
+		}
+
+		err := s.downloadAndPublish(ctx, srv.URL+"/agent.apk", "v1.0.0")
+		if err == nil {
+			t.Fatal("expected downloadAndPublish to fail (rename onto non-empty directory)")
+		}
+
+		// After the failure, the tmp file must be removed.
+		if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+			t.Fatal("expected tmp file to be cleaned up after failed rename")
+		}
+	})
+}

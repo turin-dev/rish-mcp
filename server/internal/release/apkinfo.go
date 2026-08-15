@@ -34,8 +34,8 @@ type ApkInfo struct {
 
 // android:versionCode / android:versionName, from android.R.attr.
 const (
-	attrVersionCode = 0x0101021b
-	attrVersionName = 0x0101021c
+	AttrVersionCode = 0x0101021b
+	AttrVersionName = 0x0101021c
 )
 
 const (
@@ -185,10 +185,10 @@ func parseStartTagAttrs(axml []byte, p int, strs []string, resourceMap []uint32)
 		}
 
 		switch resID {
-		case attrVersionCode:
+		case AttrVersionCode:
 			versionCode = int(data)
 			haveCode = true
-		case attrVersionName:
+		case AttrVersionName:
 			// 0x03 = TYPE_STRING, where data indexes the pool.
 			if rawValueIdx >= 0 && int(rawValueIdx) < len(strs) {
 				versionName = strs[rawValueIdx]

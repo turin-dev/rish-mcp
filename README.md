@@ -57,7 +57,7 @@ Wear OS performance, server code quality, no official version endpoint).
 | `ConnectionManager` / `AgentService` / `MainActivity` (pairing UI) | ✅ built, compiles — **not verified against a real device** |
 | Low-spec hybrid connection + FCM wake | ⛔ blocked — needs a Firebase project (see `docs/DESIGN.md` §7) |
 | Docker packaging for the Go binaries | ✅ `server/Dockerfile` (`--target relay` / `--target publicserver`) |
-| docker-compose / reverse-proxy deploy config | not yet ported |
+| docker-compose / reverse-proxy deploy config | ✅ `docker-compose.yml` (Traefik/Dokploy) |
 
 ## Components
 
@@ -69,6 +69,19 @@ Wear OS performance, server code quality, no official version endpoint).
 - `app/` — Android (Kotlin). One installable APK: pairs with the device's own
   `adbd` to run commands as shell uid, a foreground service holds the
   outbound WS, auto-starts on boot.
+
+## Quick start: Android setup CLI
+
+If you want the guided installer rather than building the APK and configuring
+`adb` by hand, run it directly with `npx`:
+
+```bash
+npx rish-mcp-setup
+```
+
+It requires Node.js 18 or newer and does not install globally. For scripts, use
+`--yes --action setup|apk|relay`; see [`cli/README.md`](cli/README.md) for all
+options and environment variables.
 
 ## Build
 
@@ -89,12 +102,23 @@ cd app && docker build -t rishmcp-android-build -f Dockerfile.build .
 
 ## Deploy
 
-Not yet fully re-documented for this rewrite. `server/Dockerfile` produces
-runnable images for both binaries; wiring them behind a reverse proxy with
-`AI_TOKEN`/`DEVICE_TOKEN`/`PUBLIC_URL` is the same shape as the old
-[`before/docker-compose.yml`](before/docker-compose.yml), just without a
-docker-compose file re-created yet. See [`docs/USAGE.md`](docs/USAGE.md) for
-every environment variable both binaries read.
+For a Dokploy host with an external Traefik network, copy `.env.example` to
+`.env`, set the two hostnames and generate `AI_TOKEN`/`DEVICE_TOKEN`, then run:
+
+```bash
+cp .env.example .env
+# edit .env and replace both secrets
+openssl rand -hex 32
+
+docker network create dokploy-network  # once, if it does not exist
+docker compose up -d --build
+curl -fsS "https://${MCP_HOST}/healthz"
+```
+
+`docker-compose.yml` keeps the trust boundary explicit: the relay receives
+shell-access secrets and serves MCP/agent traffic, while the separate
+publicserver serves only release metadata and the APK. For all variables and
+manual Docker deployment, see [`docs/USAGE.md`](docs/USAGE.md).
 
 ## Use from an AI (MCP client)
 

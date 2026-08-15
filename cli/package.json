@@ -28,10 +28,16 @@
     "rish-mcp-setup": "./index.js"
   },
   "files": [
-    "index.js"
+    "index.js",
+    "args.js",
+    "download.js",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
   },
   "dependencies": {
     "adm-zip": "^0.6.0"

@@ -92,6 +92,7 @@ func (s *Source) Start(ctx context.Context) {
 		log.Printf("[release] serving local APK_PATH=%s (GitHub polling disabled)", s.opts.LocalAPK)
 		return
 	}
+	s.removeStaleTmp()
 	s.loadCache()
 	go func() {
 		s.refresh(ctx)
@@ -254,6 +255,7 @@ func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string) e
 	}
 
 	if err := os.Rename(tmp, s.apkFile()); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	metaBytes, _ := json.Marshal(map[string]string{"tag": tag, "fetchedAt": time.Now().UTC().Format(time.RFC3339)})
@@ -272,4 +274,12 @@ func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string) e
 
 func (s *Source) warnFailed(err error) {
 	log.Printf("[release] refresh failed: %v", err)
+}
+
+// removeStaleTmp deletes any leftover *.tmp file from a previous crash.
+// Called once at startup so an orphaned download doesn't accumulate on disk.
+func (s *Source) removeStaleTmp() {
+	if err := os.Remove(s.apkFile() + ".tmp"); err != nil && !os.IsNotExist(err) {
+		log.Printf("[release] failed to clean up stale tmp file: %v", err)
+	}
 }

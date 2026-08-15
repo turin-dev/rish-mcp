@@ -24,4 +24,5 @@ server/publicserver
 # Secrets
 .env
 *.env
+*.bak.*
 !.env.example

@@ -24,6 +24,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Owns the relay WebSocket and routes "exec" frames to [AdbShellClient].
@@ -55,7 +56,22 @@ class ConnectionManager(
     @Volatile private var ws: WebSocket? = null
     @Volatile private var stopped = false
     @Volatile private var connectedNetHandle = 0L
-    private var backoffMs = 1000L
+    private val backoffMs = AtomicLong(1000)
+
+    /**
+     * Monotonic generation counter for relay sockets. connectRelay() bumps it
+     * and binds the new socket's listener to that value; listener callbacks
+     * ignore themselves unless their epoch is still current. This replaces a
+     * bare `webSocket !== ws` staleness check, which had a read-timing race:
+     * a dying socket's onFailure could read `ws` before forceReconnect()
+     * nulled it, pass the check, and schedule a second reconnection right as
+     * connectRelay() was creating the replacement socket — two live sockets
+     * on the wire. Binding the epoch at creation time closes that window.
+     *
+     * Extracted to [EpochGate] so the race semantics are testable without
+     * Android dependencies.
+     */
+    private val epochGate = EpochGate()
 
     fun start() {
         stopped = false
@@ -77,7 +93,12 @@ class ConnectionManager(
     fun forceReconnect(reason: String) {
         if (stopped) return
         AgentState.lastEvent = "reconnect: $reason"
-        backoffMs = 1000
+        backoffMs.set(1000)
+        // Bump the epoch BEFORE tearing down the socket: any callback the old
+        // socket still fires (onFailure from the cancel, onClosed from the
+        // close) then self-ignores, so it can neither schedule a duplicate
+        // reconnect nor clobber the new socket's state.
+        epochGate.next()
         runCatching { ws?.cancel() }
         ws = null
         ensureShellConnected()
@@ -139,18 +160,26 @@ class ConnectionManager(
         }
         AgentState.conn = AgentState.Conn.CONNECTING
         onStateChanged()
-        ws = http.newWebSocket(Request.Builder().url(full).build(), listener)
+        val epoch = epochGate.next()
+        ws = http.newWebSocket(Request.Builder().url(full).build(), listener(epoch))
     }
 
     private fun scheduleReconnect() {
         if (stopped) return
-        main.postDelayed({ if (AgentState.conn != AgentState.Conn.CONNECTED) connectRelay() }, backoffMs)
-        backoffMs = (backoffMs * 2).coerceAtMost(30_000)
+        main.postDelayed(
+            { if (AgentState.conn != AgentState.Conn.CONNECTED) connectRelay() },
+            backoffMs.get(),
+        )
+        backoffMs.set((backoffMs.get() * 2).coerceAtMost(30_000))
     }
 
-    private val listener = object : WebSocketListener() {
+    private fun listener(epoch: Long) = object : WebSocketListener() {
+        private fun stale(webSocket: WebSocket): Boolean =
+            webSocket !== ws || !epochGate.isCurrent(epoch)
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            backoffMs = 1000
+            if (stale(webSocket)) return
+            backoffMs.set(1000)
             connectedNetHandle = connectivity.activeNetwork?.networkHandle ?: 0L
             AgentState.conn = AgentState.Conn.CONNECTED
             AgentState.connectedSince = System.currentTimeMillis()
@@ -159,11 +188,24 @@ class ConnectionManager(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (stale(webSocket)) return
             val msg = try { JSONObject(text) } catch (_: Throwable) { return }
             if (msg.optString("type") != "exec") return
             val reqId = msg.optString("reqId")
             val cmd = msg.optString("cmd")
             val timeoutMs = msg.optLong("timeoutMs", 60_000)
+            // Validate cmd against relay-side limits (maxCmdLen = 64 KiB in
+            // the Go relay). An empty or oversized cmd is rejected before it
+            // reaches the shell, which avoids a pointless ADB stream open and
+            // mirrors the server's own validation.
+            if (cmd.isBlank()) {
+                sendError(webSocket, reqId, "cmd is blank")
+                return
+            }
+            if (cmd.length > MAX_CMD_LEN) {
+                sendError(webSocket, reqId, "cmd too long (${cmd.length} > $MAX_CMD_LEN)")
+                return
+            }
             scope.launch {
                 val result = try {
                     shellClient.exec(cmd, timeoutMs)
@@ -187,12 +229,29 @@ class ConnectionManager(
                     .put("stderr", result.stderr)
                     .put("truncated", result.truncated)
                     .put("durationMs", result.durationMs)
-                webSocket.send(out.toString())
+                if (!webSocket.send(out.toString())) {
+                    Log.w(TAG, "result send failed (socket closed?) reqId=$reqId")
+                }
+            }
+        }
+
+        /** Sends a synthetic failure result so the relay client never hangs. */
+        private fun sendError(webSocket: WebSocket, reqId: String, detail: String) {
+            val out = JSONObject()
+                .put("type", "result")
+                .put("reqId", reqId)
+                .put("code", -1)
+                .put("stdout", "")
+                .put("stderr", detail)
+                .put("truncated", false)
+                .put("durationMs", 0)
+            if (!webSocket.send(out.toString())) {
+                Log.w(TAG, "error result send failed reqId=$reqId")
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (webSocket !== ws) return // stale socket from a forced reconnect
+            if (stale(webSocket)) return
             AgentState.conn = AgentState.Conn.DISCONNECTED
             AgentState.lastEvent = "disconnected: ${t.message}"
             onStateChanged()
@@ -200,7 +259,7 @@ class ConnectionManager(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (webSocket !== ws) return
+            if (stale(webSocket)) return
             AgentState.conn = AgentState.Conn.DISCONNECTED
             AgentState.lastEvent = "closed: $reason"
             onStateChanged()
@@ -265,5 +324,6 @@ class ConnectionManager(
 
     companion object {
         private const val TAG = "rishmcp"
+        private const val MAX_CMD_LEN = 64 * 1024 // 64 KiB, symmetric with relay maxCmdLen
     }
 }

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -115,6 +116,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun handleProvisioning(intent: Intent?) {
         intent ?: return
+        if (!isShellProvisioningCaller(intent)) return
+
         var changed = false
         intent.getStringExtra("relay")?.let { relayUrl = it; relayField.setText(it); changed = true }
         intent.getStringExtra("token")?.let { deviceToken = it; tokenField.setText(it); changed = true }
@@ -134,6 +137,20 @@ class MainActivity : AppCompatActivity() {
             toast("config received")
         }
         render()
+    }
+
+    /**
+     * Only the adb shell (uid 2000) may use the unattended provisioning
+     * extras. The launcher start carries no extras and is always allowed;
+     * `am start` from any other app is ignored. `getLaunchedFromUid()` is
+     * available from API 1 and returns:
+     *  - `-1` when launched from the launcher (no extras → ignored below)
+     *  - `Process.SHELL_UID` (2000) when launched from `adb shell am start`
+     *  - any other uid when launched from a third-party app (rejected)
+     */
+    private fun isShellProvisioningCaller(intent: Intent): Boolean {
+        if (intent.extras == null) return false
+        return getLaunchedFromUid() == Process.SHELL_UID
     }
 
     private fun pairAdb() {

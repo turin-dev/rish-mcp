@@ -13,6 +13,16 @@ import java.io.InputStream
  * SHELL_PROTOCOL.md), not something rish-mcp invented, so it's safe to
  * hand-roll — unlike the wireless-pairing handshake, which is left to
  * libadb-android.
+ *
+ * ## Security: per-packet allocation cap
+ *
+ * The wire length is a 4-byte little-endian integer. A malicious or corrupted
+ * adbd (or anything in between) could send a huge value, causing
+ * `ByteArray(length)` to allocate hundreds of megabytes or more, leading to
+ * OOM and a killed process. The constant [MAX_PACKET_BYTES] bounds every
+ * single-packet allocation; any excess payload bytes are silently drained so
+ * the stream framing stays intact. This is symmetric to the 256 KiB output
+ * cap the Go relay enforces server-side.
  */
 object ShellV2Protocol {
     private const val ID_STDIN = 0
@@ -24,6 +34,14 @@ object ShellV2Protocol {
 
     private const val HEADER_SIZE = 5
 
+    /**
+     * Hard upper bound on a single packet payload, in bytes. Prevents OOM
+     * from a malicious or corrupted wire source that sends an arbitrarily
+     * large frame length. Any bytes beyond this cap are drained and discarded
+     * to keep the stream framing intact.
+     */
+    private const val MAX_PACKET_BYTES = 256 * 1024 // 256 KiB
+
     /** The raw ADB service destination for a non-interactive v2 shell call. */
     fun destination(cmd: String): String = "shell,v2,raw:$cmd"
 
@@ -34,19 +52,45 @@ object ShellV2Protocol {
      * before an exit packet arrives (e.g. the caller force-closed it after a
      * timeout), `code` is -1 — the same "killed" convention the old Shizuku
      * agent used.
+     *
+     * Per-packet payload allocation is capped at [MAX_PACKET_BYTES] regardless
+     * of the wire length, preventing OOM from a single oversized frame. Any
+     * excess bytes are drained from the stream so subsequent packets remain
+     * parseable, and the `truncated` flag is set.
      */
     fun readResult(input: InputStream, maxOutputBytes: Int): ParsedResult {
         val stdout = CappedBuffer(maxOutputBytes)
         val stderr = CappedBuffer(maxOutputBytes)
         var exitCode = -1
+        var truncated = false
 
         val header = ByteArray(HEADER_SIZE)
         while (true) {
             if (!readFully(input, header)) break
             val id = header[0].toInt() and 0xFF
             val length = littleEndianInt(header, 1)
-            val payload = if (length > 0) ByteArray(length) else EMPTY
-            if (length > 0 && !readFully(input, payload)) break
+
+            // Cap the per-packet allocation to prevent OOM from a malicious
+            // or corrupted wire source. Excess bytes are drained below.
+            val safeLength = if (length > 0) {
+                if (length > MAX_PACKET_BYTES) {
+                    truncated = true
+                    MAX_PACKET_BYTES
+                } else {
+                    length
+                }
+            } else {
+                0
+            }
+
+            val payload = if (safeLength > 0) ByteArray(safeLength) else EMPTY
+            if (safeLength > 0 && !readFully(input, payload)) break
+
+            // Drain any excess beyond the cap so the stream framing stays
+            // intact for subsequent packets.
+            if (length > safeLength) {
+                drainBytes(input, length - safeLength)
+            }
 
             when (id) {
                 ID_STDOUT -> stdout.append(payload)
@@ -64,8 +108,19 @@ object ShellV2Protocol {
             code = exitCode,
             stdout = stdout.toText(),
             stderr = stderr.toText(),
-            truncated = stdout.truncated || stderr.truncated,
+            truncated = truncated || stdout.truncated || stderr.truncated,
         )
+    }
+
+    /** Reads and discards [count] bytes from [input] in small chunks. */
+    private fun drainBytes(input: InputStream, count: Int) {
+        val buf = ByteArray(4096)
+        var remaining = count
+        while (remaining > 0) {
+            val n = input.read(buf, 0, minOf(buf.size, remaining))
+            if (n < 0) break
+            remaining -= n
+        }
     }
 
     private fun littleEndianInt(buf: ByteArray, offset: Int): Int =
