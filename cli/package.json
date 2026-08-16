@@ -1,0 +1,45 @@
+{
+  "name": "rish-mcp-setup",
+  "version": "0.8.0",
+  "description": "Interactive installer for the rish-mcp Android agent -- adb, pairing, APK, install.",
+  "keywords": [
+    "rish-mcp",
+    "mcp",
+    "model-context-protocol",
+    "android",
+    "adb",
+    "cli",
+    "installer",
+    "setup",
+    "claude",
+    "ai-agent",
+    "relay",
+    "docker"
+  ],
+  "homepage": "https://github.com/turin-dev/rish-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/turin-dev/rish-mcp.git",
+    "directory": "cli"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "rish-mcp-setup": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "args.js",
+    "download.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.0"
+  }
+}

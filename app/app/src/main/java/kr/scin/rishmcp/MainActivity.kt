@@ -7,40 +7,47 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
+import kotlinx.coroutines.launch
+import kr.scin.rishmcp.Prefs.adbPort
 import kr.scin.rishmcp.Prefs.deviceToken
 import kr.scin.rishmcp.Prefs.enabled
 import kr.scin.rishmcp.Prefs.relayUrl
-import rikka.shizuku.Shizuku
 
+/**
+ * Provisioning UI. Replaces the old "Grant Shizuku" flow with ADB pairing:
+ * on Android 11+, wireless-debugging pairing (a code the user reads off
+ * Settings); below that, just the port from the PC+adb tcpip bridge
+ * (docs/DESIGN.md §3.1). Also handles headless `am start` provisioning.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusDot: View
     private lateinit var statusText: TextView
     private lateinit var uptime: TextView
-    private lateinit var rowShizuku: TextView
+    private lateinit var rowShell: TextView
     private lateinit var rowNetwork: TextView
     private lateinit var rowDevice: TextView
     private lateinit var rowStats: TextView
     private lateinit var rowEvent: TextView
     private lateinit var relayField: TextInputEditText
     private lateinit var tokenField: TextInputEditText
+    private lateinit var pairHint: TextView
+    private lateinit var pairingSection: View
+    private lateinit var pairingPortField: TextInputEditText
+    private lateinit var pairingCodeField: TextInputEditText
+    private lateinit var connectPortField: TextInputEditText
 
     private val ui = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() { render(); ui.postDelayed(this, 1000) }
-    }
-
-    private val permListener = Shizuku.OnRequestPermissionResultListener { _, result ->
-        runOnUiThread {
-            toast(if (result == PackageManager.PERMISSION_GRANTED) "Shizuku granted" else "Shizuku denied")
-            render()
-        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,28 +57,44 @@ class MainActivity : AppCompatActivity() {
         statusDot = findViewById(R.id.statusDot)
         statusText = findViewById(R.id.statusText)
         uptime = findViewById(R.id.uptime)
-        rowShizuku = findViewById(R.id.rowShizuku)
+        rowShell = findViewById(R.id.rowShell)
         rowNetwork = findViewById(R.id.rowNetwork)
         rowDevice = findViewById(R.id.rowDevice)
         rowStats = findViewById(R.id.rowStats)
         rowEvent = findViewById(R.id.rowEvent)
         relayField = findViewById(R.id.relayField)
         tokenField = findViewById(R.id.tokenField)
+        pairHint = findViewById(R.id.pairHint)
+        pairingSection = findViewById(R.id.pairingSection)
+        pairingPortField = findViewById(R.id.pairingPortField)
+        pairingCodeField = findViewById(R.id.pairingCodeField)
+        connectPortField = findViewById(R.id.connectPortField)
 
         findViewById<TextView>(R.id.subtitle).text =
-            if (DeviceProfile.isWatch(this)) "Wear OS · Shizuku shell → MCP" else "Shizuku shell → MCP agent"
+            if (DeviceProfile.isWatch(this)) "Wear OS · ADB shell → MCP" else "ADB shell → MCP agent"
 
         relayField.setText(relayUrl)
         tokenField.setText(deviceToken)
+        if (adbPort > 0) connectPortField.setText(adbPort.toString())
 
-        findViewById<MaterialButton>(R.id.btnShizuku).setOnClickListener { requestShizuku() }
+        // Wireless-debugging pairing (adb pair) only exists on Android 11+;
+        // below that, the only path is the PC+adb tcpip bridge.
+        val hasWirelessPairing = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        pairingSection.visibility = if (hasWirelessPairing) View.VISIBLE else View.GONE
+        pairHint.text = if (hasWirelessPairing) {
+            "설정 → 개발자 옵션 → 무선 디버깅 → 페어링 코드로 기기 페어링에서 확인한 포트/코드를 입력하세요"
+        } else {
+            "Android 11 미만: PC에서 adb로 'adb tcpip <port>'를 1회 실행한 뒤, 그 포트만 아래에 입력하세요"
+        }
+
+        findViewById<MaterialButton>(R.id.btnPair).setOnClickListener { pairAdb() }
+        findViewById<MaterialButton>(R.id.btnSaveAdbPort).setOnClickListener { saveAdbPort() }
         findViewById<MaterialButton>(R.id.btnStart).setOnClickListener { saveAndStart() }
         findViewById<MaterialButton>(R.id.btnStop).setOnClickListener {
             enabled = false; AgentService.stop(this); toast("agent stopped"); render()
         }
         findViewById<MaterialButton>(R.id.btnTest).setOnClickListener { runTest() }
 
-        Shizuku.addRequestPermissionResultListener(permListener)
         maybeRequestNotifications()
         handleProvisioning(intent)
     }
@@ -84,20 +107,28 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() { super.onResume(); ui.post(ticker) }
     override fun onPause() { super.onPause(); ui.removeCallbacks(ticker) }
-    override fun onDestroy() {
-        Shizuku.removeRequestPermissionResultListener(permListener); super.onDestroy()
-    }
 
     /**
      * Headless provisioning from a shell:
      *   am start -n kr.scin.rishmcp/.MainActivity \
-     *     --es relay wss://mcp.turin.my/agent --es token <DEVICE_TOKEN> --ez autostart true
+     *     --es relay wss://mcp.example.com/agent --es token <DEVICE_TOKEN> \
+     *     --ei adbPort <PORT> --ez autostart true
      */
     private fun handleProvisioning(intent: Intent?) {
         intent ?: return
+        if (!isShellProvisioningCaller(intent)) return
+
         var changed = false
         intent.getStringExtra("relay")?.let { relayUrl = it; relayField.setText(it); changed = true }
         intent.getStringExtra("token")?.let { deviceToken = it; tokenField.setText(it); changed = true }
+        if (intent.hasExtra("adbPort")) {
+            val port = intent.getIntExtra("adbPort", 0)
+            if (port > 0) {
+                adbPort = port
+                connectPortField.setText(port.toString())
+                changed = true
+            }
+        }
         if (intent.getBooleanExtra("autostart", false)) {
             enabled = true
             AgentService.start(this, reconnect = true)
@@ -108,12 +139,51 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
-    private fun requestShizuku() {
-        if (!Shizuku.pingBinder()) { toast("Shizuku app is not running"); return }
-        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-            toast("already granted"); render(); return
+    /**
+     * Only the adb shell (uid 2000) may use the unattended provisioning
+     * extras. The launcher start carries no extras and is always allowed;
+     * `am start` from any other app is ignored. `getLaunchedFromUid()` is
+     * available from API 1 and returns:
+     *  - `-1` when launched from the launcher (no extras → ignored below)
+     *  - `Process.SHELL_UID` (2000) when launched from `adb shell am start`
+     *  - any other uid when launched from a third-party app (rejected)
+     */
+    private fun isShellProvisioningCaller(intent: Intent): Boolean {
+        if (intent.extras == null) return false
+        return getLaunchedFromUid() == Process.SHELL_UID
+    }
+
+    private fun pairAdb() {
+        val port = pairingPortField.text.toString().trim().toIntOrNull()
+        val code = pairingCodeField.text.toString().trim()
+        if (port == null || port <= 0 || code.isBlank()) {
+            toast("pairing port와 code를 입력하세요")
+            return
         }
-        Shizuku.requestPermission(1001)
+        lifecycleScope.launch {
+            AgentState.shell = "pairing…"
+            render()
+            val ok = try {
+                AdbShellClient.getInstance(this@MainActivity).pairWireless("127.0.0.1", port, code)
+            } catch (e: Throwable) {
+                false
+            }
+            AgentState.shell = if (ok) "paired" else "pairing failed"
+            toast(if (ok) "페어링 완료 — 아래 Connect port도 입력하고 저장하세요" else "페어링 실패")
+            render()
+        }
+    }
+
+    private fun saveAdbPort() {
+        val port = connectPortField.text.toString().trim().toIntOrNull()
+        if (port == null || port <= 0) {
+            toast("포트를 입력하세요")
+            return
+        }
+        adbPort = port
+        toast("adb port 저장됨")
+        if (AgentState.serviceRunning) AgentService.start(this, reconnect = true)
+        render()
     }
 
     private fun saveAndStart() {
@@ -149,12 +219,7 @@ class MainActivity : AppCompatActivity() {
         uptime.text = if (s.conn == AgentState.Conn.CONNECTED && s.connectedSince > 0)
             "up ${fmtDuration(System.currentTimeMillis() - s.connectedSince)}" else ""
 
-        val shizukuLive = when {
-            !Shizuku.pingBinder() -> "not running"
-            Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> "permission needed"
-            else -> s.shizuku
-        }
-        rowShizuku.text = "Shizuku:  $shizukuLive"
+        rowShell.text = "ADB shell: ${s.shell}"
         rowNetwork.text = "Network:  ${s.network}"
         rowDevice.text = "Device:   ${Build.MODEL} · ${Prefs.deviceId(this)}"
         rowStats.text = "Commands: ${s.commandsRun}" +

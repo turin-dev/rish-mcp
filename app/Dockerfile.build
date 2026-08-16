@@ -1,5 +1,5 @@
-# Android build toolchain (SDK + Gradle) — used only to assemble the APK.
-# Nothing from this image runs in production; it just produces app-release.apk.
+# Android build toolchain (SDK + Gradle) — used only to assemble/test the app.
+# Nothing from this image runs in production.
 FROM eclipse-temurin:17-jdk-jammy
 
 ENV ANDROID_SDK_ROOT=/opt/android-sdk

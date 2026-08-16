@@ -4,61 +4,23 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
-import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.util.Log
-import kr.scin.rishmcp.Prefs.deviceToken
-import kr.scin.rishmcp.Prefs.relayUrl
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import org.json.JSONObject
-import rikka.shizuku.Shizuku
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 /**
- * Always-on foreground service. Holds one outbound WebSocket to the relay and
- * executes forwarded commands via the Shizuku-backed [ShellUserService].
+ * Always-on foreground service. Holds the relay connection (via
+ * [ConnectionManager]) and the ADB shell session (via [AdbShellClient]).
  *
- * The same APK is used on phones/tablets and Wear OS. Watches use a slower
- * WebSocket ping/heartbeat cadence to reduce radio wakeups and battery drain.
- *
- * Watchdog: (1) a ConnectivityManager callback forces an immediate reconnect on
- * any network change (data<->wifi<->phone proxy) so there is no long ping-timeout
- * gap; (2) Shizuku binder listeners rebind the shell backend when Shizuku
- * comes/goes; and (3) a periodic heartbeat re-establishes anything that silently
- * dropped.
+ * This used to own the WebSocket and the Shizuku UserService binding
+ * directly; that logic now lives in ConnectionManager/AdbShellClient, so
+ * this class stays a thin lifecycle + notification shell (docs/DESIGN.md
+ * §2.1: "역할 동일, AdbShellClient/ConnectionManager 사용하도록 내부 배선만
+ * 교체").
  */
 class AgentService : Service() {
 
-    private val main = Handler(Looper.getMainLooper())
-    private val execPool = Executors.newSingleThreadExecutor()
-    private val http by lazy {
-        OkHttpClient.Builder()
-            .pingInterval(DeviceProfile.webSocketPingSeconds(this), TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build()
-    }
-    private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
-
-    @Volatile private var ws: WebSocket? = null
-    @Volatile private var userService: IUserService? = null
-    @Volatile private var stopped = false
-    private var backoffMs = 1000L
-
-    // --- lifecycle ------------------------------------------------------------
+    private lateinit var connectionManager: ConnectionManager
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,254 +28,34 @@ class AgentService : Service() {
         super.onCreate()
         AgentState.serviceRunning = true
         startForeground(NOTIF_ID, buildNotification("starting…"))
-        registerShizukuListeners()
-        registerNetworkCallback()
-        bindShizuku()
-        connect()
-        main.postDelayed(heartbeat, DeviceProfile.heartbeatMs(this))
+        connectionManager = ConnectionManager(
+            context = this,
+            shellClient = AdbShellClient.getInstance(this),
+            onStateChanged = ::updateNotif,
+        )
+        connectionManager.start()
+        updateNotif()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Re-provisioning (new relay/token) restarts the connection without force-stop.
-        if (intent?.getBooleanExtra("reconnect", false) == true) forceReconnect("reconfigured")
+        // Re-provisioning (new relay/token/adb host) restarts the connection
+        // without a force-stop.
+        if (intent?.getBooleanExtra("reconnect", false) == true) {
+            connectionManager.forceReconnect("reconfigured")
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        stopped = true
         AgentState.serviceRunning = false
         AgentState.conn = AgentState.Conn.IDLE
-        main.removeCallbacksAndMessages(null)
-        try { ws?.close(1000, "service stopping") } catch (_: Throwable) {}
-        try { connectivity.unregisterNetworkCallback(netCallback) } catch (_: Throwable) {}
-        unregisterShizukuListeners()
-        try { Shizuku.unbindUserService(userServiceArgs, userServiceConn, true) } catch (_: Throwable) {}
-        execPool.shutdownNow()
+        connectionManager.stop()
         super.onDestroy()
     }
 
-    // --- Shizuku --------------------------------------------------------------
-
-    private val userServiceArgs by lazy {
-        Shizuku.UserServiceArgs(ComponentName(packageName, ShellUserService::class.java.name))
-            .daemon(false)
-            .processNameSuffix("shell")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-    }
-
-    private val userServiceConn = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            userService = if (binder != null && binder.pingBinder()) IUserService.Stub.asInterface(binder) else null
-            AgentState.shizuku = if (userService != null) "bound ✓" else "bind failed"
-            Log.i(TAG, "Shizuku user service bound")
-        }
-        override fun onServiceDisconnected(name: ComponentName?) {
-            userService = null
-            AgentState.shizuku = "disconnected"
-            Log.w(TAG, "Shizuku user service disconnected")
-        }
-    }
-
-    private val binderReceived = Shizuku.OnBinderReceivedListener {
-        Log.i(TAG, "Shizuku binder received"); bindShizuku()
-    }
-    private val binderDead = Shizuku.OnBinderDeadListener {
-        userService = null; AgentState.shizuku = "dead"; Log.w(TAG, "Shizuku binder dead")
-    }
-
-    private fun registerShizukuListeners() {
-        Shizuku.addBinderReceivedListenerSticky(binderReceived)
-        Shizuku.addBinderDeadListener(binderDead)
-    }
-    private fun unregisterShizukuListeners() {
-        try { Shizuku.removeBinderReceivedListener(binderReceived) } catch (_: Throwable) {}
-        try { Shizuku.removeBinderDeadListener(binderDead) } catch (_: Throwable) {}
-    }
-
-    private fun shizukuReady(): Boolean =
-        Shizuku.pingBinder() &&
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-
-    private fun bindShizuku() {
-        if (userService != null) return
-        if (!Shizuku.pingBinder()) { AgentState.shizuku = "not running"; return }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            AgentState.shizuku = "permission needed"; return
-        }
-        try {
-            AgentState.shizuku = "binding…"
-            Shizuku.bindUserService(userServiceArgs, userServiceConn)
-        } catch (e: Throwable) {
-            Log.e(TAG, "bindUserService failed", e)
-            AgentState.shizuku = "bind error"
-        }
-    }
-
-    // --- network watchdog -----------------------------------------------------
-    // Use the DEFAULT-network callback: it fires when the network the app's
-    // traffic actually uses changes, not on every signal blip. On Wear OS this
-    // may be Wi-Fi, cellular, or a Bluetooth/phone-proxied path.
-
-    @Volatile private var connectedNetHandle = 0L
-
-    private val netCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            AgentState.network = typeOf(connectivity.getNetworkCapabilities(network))
-            if (AgentState.conn == AgentState.Conn.CONNECTED &&
-                connectedNetHandle == network.networkHandle) return // same network, keep socket
-            AgentState.lastEvent = "default network → ${AgentState.network}"
-            scheduleSwitchReconnect()
-        }
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            AgentState.network = typeOf(caps) // label only — no reconnect on signal changes
-        }
-        override fun onLost(network: Network) {
-            AgentState.network = "none"; AgentState.lastEvent = "network lost"
-        }
-    }
-
-    private fun typeOf(caps: NetworkCapabilities?): String = DeviceProfile.networkLabel(caps)
-
-    private fun registerNetworkCallback() {
-        try { connectivity.registerDefaultNetworkCallback(netCallback) } catch (e: Throwable) {
-            Log.e(TAG, "registerDefaultNetworkCallback failed", e)
-        }
-    }
-
-    private val switchReconnect = Runnable { forceReconnect("network switch") }
-    private fun scheduleSwitchReconnect() {
-        if (stopped) return
-        main.removeCallbacks(switchReconnect)
-        main.postDelayed(switchReconnect, 800)
-    }
-
-    private fun forceReconnect(reason: String) {
-        if (stopped) return
-        AgentState.lastEvent = "reconnect: $reason"
-        backoffMs = 1000
-        try { ws?.cancel() } catch (_: Throwable) {}
-        ws = null
-        connect()
-    }
-
-    // --- heartbeat ------------------------------------------------------------
-
-    private val heartbeat = object : Runnable {
-        override fun run() {
-            if (stopped) return
-            if (!shizukuReady()) {
-                userService = null
-                AgentState.shizuku = if (!Shizuku.pingBinder()) "not running" else "permission needed"
-            } else if (userService == null) {
-                bindShizuku()
-            }
-            if (AgentState.conn != AgentState.Conn.CONNECTED &&
-                AgentState.conn != AgentState.Conn.CONNECTING) {
-                connect()
-            }
-            main.postDelayed(this, DeviceProfile.heartbeatMs(this@AgentService))
-        }
-    }
-
-    // --- WebSocket relay ------------------------------------------------------
-
-    private fun connect() {
-        if (stopped) return
-        val url = relayUrl
-        val token = deviceToken
-        if (url.isBlank() || token.isBlank()) {
-            AgentState.conn = AgentState.Conn.IDLE
-            AgentState.lastEvent = "not configured"
-            updateNotif(); return
-        }
-        val wsBase = when {
-            url.startsWith("ws") -> url
-            url.startsWith("http") -> "ws" + url.substring(4)
-            else -> "wss://$url"
-        }
-        val full = buildString {
-            append(wsBase)
-            append(if (wsBase.contains("?")) "&" else "?")
-            append("token=").append(token)
-            append("&deviceId=").append(Prefs.deviceId(this@AgentService))
-            append("&name=").append(Build.MODEL.replace(" ", "_"))
-            append("&sdk=").append(Build.VERSION.SDK_INT)
-            append("&kind=").append(DeviceProfile.kind(this@AgentService))
-            // Reported so the relay can flag agents older than the build it ships.
-            append("&ver=").append(BuildConfig.VERSION_NAME)
-            append("&vc=").append(BuildConfig.VERSION_CODE)
-        }
-        AgentState.conn = AgentState.Conn.CONNECTING
-        updateNotif()
-        ws = http.newWebSocket(Request.Builder().url(full).build(), listener)
-    }
-
-    private fun scheduleReconnect() {
-        if (stopped) return
-        main.postDelayed({ if (AgentState.conn != AgentState.Conn.CONNECTED) connect() }, backoffMs)
-        backoffMs = (backoffMs * 2).coerceAtMost(30_000)
-    }
-
-    private val listener = object : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-            backoffMs = 1000
-            connectedNetHandle = connectivity.activeNetwork?.networkHandle ?: 0L
-            AgentState.conn = AgentState.Conn.CONNECTED
-            AgentState.connectedSince = System.currentTimeMillis()
-            AgentState.lastEvent = "connected"
-            updateNotif()
-        }
-
-        override fun onMessage(webSocket: WebSocket, text: String) {
-            val msg = try { JSONObject(text) } catch (_: Throwable) { return }
-            if (msg.optString("type") != "exec") return
-            val reqId = msg.optString("reqId")
-            val cmd = msg.optString("cmd")
-            val timeoutMs = msg.optLong("timeoutMs", 60_000)
-            execPool.execute {
-                val svc = userService
-                val resultJson = if (svc == null) {
-                    JSONObject()
-                        .put("code", -1).put("stdout", "")
-                        .put("stderr", "shell backend unavailable (Shizuku not bound)")
-                        .put("truncated", false).put("durationMs", 0).toString()
-                } else {
-                    try { svc.exec(cmd, timeoutMs) } catch (e: Throwable) {
-                        JSONObject().put("code", -1).put("stdout", "")
-                            .put("stderr", "exec error: ${e.message}")
-                            .put("truncated", false).put("durationMs", 0).toString()
-                    }
-                }
-                AgentState.commandsRun++
-                AgentState.lastCommandAt = System.currentTimeMillis()
-                val out = JSONObject(resultJson).put("type", "result").put("reqId", reqId)
-                webSocket.send(out.toString())
-            }
-        }
-
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (webSocket !== ws) return // stale socket from a forced reconnect
-            AgentState.conn = AgentState.Conn.DISCONNECTED
-            AgentState.lastEvent = "disconnected: ${t.message}"
-            updateNotif()
-            scheduleReconnect()
-        }
-
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (webSocket !== ws) return
-            AgentState.conn = AgentState.Conn.DISCONNECTED
-            AgentState.lastEvent = "closed: $reason"
-            updateNotif()
-            scheduleReconnect()
-        }
-    }
-
-    // --- notification ---------------------------------------------------------
-
     private fun updateNotif() {
         val text = when (AgentState.conn) {
-            AgentState.Conn.CONNECTED -> "connected · ${AgentState.network}"
+            AgentState.Conn.CONNECTED -> "connected · ${AgentState.network} · shell ${AgentState.shell}"
             AgentState.Conn.CONNECTING -> "connecting…"
             AgentState.Conn.DISCONNECTED -> "reconnecting…"
             AgentState.Conn.IDLE -> AgentState.lastEvent.ifBlank { "idle" }
@@ -323,11 +65,9 @@ class AgentService : Service() {
 
     private fun buildNotification(text: String): Notification {
         val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL, "rish-mcp agent", NotificationManager.IMPORTANCE_LOW)
-            ch.setShowBadge(false)
-            nm.createNotificationChannel(ch)
-        }
+        val channel = NotificationChannel(CHANNEL, "rish-mcp agent", NotificationManager.IMPORTANCE_LOW)
+        channel.setShowBadge(false)
+        nm.createNotificationChannel(channel)
         return Notification.Builder(this, CHANNEL)
             .setContentTitle(if (DeviceProfile.isWatch(this)) "rish-mcp watch agent" else "rish-mcp agent")
             .setContentText(text)
@@ -337,17 +77,15 @@ class AgentService : Service() {
     }
 
     companion object {
-        private const val TAG = "rishmcp"
         private const val CHANNEL = "rishmcp-agent"
         private const val NOTIF_ID = 42
 
-        fun start(ctx: android.content.Context, reconnect: Boolean = false) {
-            val i = Intent(ctx, AgentService::class.java).putExtra("reconnect", reconnect)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
-            else ctx.startService(i)
+        fun start(ctx: Context, reconnect: Boolean = false) {
+            val intent = Intent(ctx, AgentService::class.java).putExtra("reconnect", reconnect)
+            ctx.startForegroundService(intent)
         }
 
-        fun stop(ctx: android.content.Context) {
+        fun stop(ctx: Context) {
             ctx.stopService(Intent(ctx, AgentService::class.java))
         }
     }

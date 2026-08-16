@@ -1,30 +1,24 @@
-# Dokploy "Compose" stack.
-#
-# Two hostnames, two containers, deliberately separated:
-#   MCP_HOST         private — the relay. MCP endpoint (/mcp) and the device
-#                    WebSocket (/agent), both token-gated. Shell access lives here.
-#   PUBLIC_MCP_HOST  public  — release metadata and the agent APK. No secrets, no
-#                    device information, no route to the relay.
-#
-# Neither mounts a locally built APK. Both fetch the signed APK from the GitHub
-# release CI publishes on a v* tag and cache it in a named volume, so a fresh
-# deploy needs nothing on disk beyond this file.
+# Dokploy/Traefik deployment for the Go relay and public release server.
+# MCP_HOST is private: it exposes /mcp, /agent, and OAuth.
+# PUBLIC_MCP_HOST is public: it serves only release metadata and the APK.
 services:
-  rish-mcp:
+  rish-mcp-relay:
     build:
       context: ./server
+      target: relay
+    image: rishmcp-relay:latest
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid,nodev
     environment:
       PORT: "8080"
       PUBLIC_URL: "https://${MCP_HOST}"
-      AI_TOKEN: "${AI_TOKEN}"
-      DEVICE_TOKEN: "${DEVICE_TOKEN}"
-      DEFAULT_TIMEOUT_MS: "60000"
-      MAX_TIMEOUT_MS: "600000"
-      GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
-      RELEASE_CACHE_DIR: "/var/cache/rish-mcp"
-    volumes:
-      - relay-release:/var/cache/rish-mcp
+      AI_TOKEN: "${AI_TOKEN:?AI_TOKEN is required}"
+      DEVICE_TOKEN: "${DEVICE_TOKEN:?DEVICE_TOKEN is required}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      DEFAULT_TIMEOUT_MS: "${DEFAULT_TIMEOUT_MS:-60000}"
+      MAX_TIMEOUT_MS: "${MAX_TIMEOUT_MS:-600000}"
     labels:
       - traefik.enable=true
       - traefik.http.routers.rishmcp.rule=Host(`${MCP_HOST}`)
@@ -34,31 +28,34 @@ services:
     networks:
       - dokploy-network
 
-  # Same image, different entrypoint: it never constructs the relay, so this
-  # container has no AI_TOKEN/DEVICE_TOKEN and nothing to leak if it is abused.
   rish-mcp-public:
     build:
       context: ./server
-    command: ["node", "dist/public.js"]
+      target: publicserver
+    image: rishmcp-public:latest
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid,nodev
     environment:
       PORT: "8080"
       GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
-      RELEASE_CACHE_DIR: "/var/cache/rish-mcp"
-      DOWNLOADS_PER_HOUR: "30"
+      RELEASE_CACHE_DIR: /var/cache/rish-mcp
+      DOWNLOADS_PER_HOUR: "${DOWNLOADS_PER_HOUR:-30}"
+      RELEASE_POLL_MS: "${RELEASE_POLL_MS:-900000}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     volumes:
       - public-release:/var/cache/rish-mcp
     labels:
       - traefik.enable=true
-      - traefik.http.routers.rishmcppublic.rule=Host(`${PUBLIC_MCP_HOST}`)
-      - traefik.http.routers.rishmcppublic.entrypoints=websecure
-      - traefik.http.routers.rishmcppublic.tls.certresolver=letsencrypt
-      - traefik.http.services.rishmcppublic.loadbalancer.server.port=8080
+      - traefik.http.routers.rishmcp-public.rule=Host(`${PUBLIC_MCP_HOST}`)
+      - traefik.http.routers.rishmcp-public.entrypoints=websecure
+      - traefik.http.routers.rishmcp-public.tls.certresolver=letsencrypt
+      - traefik.http.services.rishmcp-public.loadbalancer.server.port=8080
     networks:
       - dokploy-network
 
 volumes:
-  relay-release:
   public-release:
 
 networks:

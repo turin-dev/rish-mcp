@@ -1,16 +1,28 @@
-FROM node:22-alpine AS build
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build && npm prune --omit=dev
+# Multi-target build: `docker build --target relay` or `--target publicserver`.
+# Two separate images from one Dockerfile so the trust boundary in
+# docs/DESIGN.md §2.3/§5 stays real at the deployment level too -- the
+# publicserver image contains no relay code, no token-checking logic, nothing
+# that could serve /mcp or /agent even if misconfigured.
 
-FROM node:22-alpine
-WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY package.json ./
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/relay ./cmd/relay
+RUN CGO_ENABLED=0 go build -o /out/publicserver ./cmd/publicserver
+
+FROM alpine:3.20 AS relay
+RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 appuser
+COPY --from=build /out/relay /usr/local/bin/relay
 EXPOSE 8080
-CMD ["node", "dist/index.js"]
+USER appuser
+ENTRYPOINT ["/usr/local/bin/relay"]
+
+FROM alpine:3.20 AS publicserver
+RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 appuser
+COPY --from=build /out/publicserver /usr/local/bin/publicserver
+RUN mkdir -p /var/cache/rish-mcp && chown appuser:appuser /var/cache/rish-mcp
+EXPOSE 8080
+USER appuser
+ENTRYPOINT ["/usr/local/bin/publicserver"]

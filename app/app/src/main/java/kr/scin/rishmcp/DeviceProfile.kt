@@ -23,7 +23,7 @@ object DeviceProfile {
     /**
      * Keepalive ping. A watch pings less often than a handheld to keep the radio
      * asleep, but NEVER disables pings: OkHttp's ping timeout is the only thing
-     * that surfaces a half-open socket to [AgentService], and the heartbeat below
+     * that surfaces a half-open socket to [ConnectionManager], and the heartbeat
      * only reconnects when the state is already known-bad.
      */
     fun webSocketPingSeconds(ctx: Context): Long = if (isWatch(ctx)) 60L else 20L

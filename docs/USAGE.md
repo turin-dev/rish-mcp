@@ -1,24 +1,17 @@
-# rish-mcp — detailed usage guide
+# rish-mcp — usage guide
 
-This is the long-form companion to the [README](../README.md). It walks through
-the whole path end to end: deploy the relay, install the agent on the phone,
-connect an AI client (including the **Claude mobile app** via OAuth), and covers
-the tool reference, OAuth model, recipes, troubleshooting, and the threat model.
+Companion to the [README](../README.md) and [`docs/DESIGN.md`](DESIGN.md).
+This covers deploying the two Go binaries, pairing the Android agent without
+Shizuku, the MCP tool reference, the OAuth flow, and the WS relay protocol.
 
 - [1. How it fits together](#1-how-it-fits-together)
-- [2. Deploy the relay + MCP server](#2-deploy-the-relay--mcp-server)
-- [3. Install the agent on the phone](#3-install-the-agent-on-the-phone)
+- [2. Deploy the relay](#2-deploy-the-relay)
+- [3. Pair the Android agent](#3-pair-the-android-agent)
 - [4. Connect an AI client](#4-connect-an-ai-client)
-  - [4.1 Claude Code](#41-claude-code-cli--desktop--web)
-  - [4.2 Claude API / Agent SDK](#42-claude-api--agent-sdk)
-  - [4.3 claude.ai custom connector (OAuth) — incl. the phone app](#43-claudeai-custom-connector-oauth--incl-the-phone-app)
-  - [4.4 Any other MCP client](#44-any-other-mcp-client)
 - [5. Tool reference](#5-tool-reference)
 - [6. OAuth 2.0 reference](#6-oauth-20-reference)
-- [7. Recipes: natural language → shell](#7-recipes-natural-language--shell)
+- [7. Official version server](#7-official-version-server)
 - [8. Troubleshooting](#8-troubleshooting)
-- [9. Security & threat model](#9-security--threat-model)
-- [10. Rotating & revoking access](#10-rotating--revoking-access)
 - [Appendix A: WS relay protocol](#appendix-a-ws-relay-protocol)
 - [Appendix B: environment variables](#appendix-b-environment-variables)
 
@@ -28,381 +21,179 @@ the tool reference, OAuth model, recipes, troubleshooting, and the threat model.
 
 ```
 ┌─────────┐  MCP run_shell    ┌──────────────────────┐   WS (outbound)   ┌──────────────┐
-│   AI    │ ──HTTPS+auth────▶ │  relay + MCP server  │ ◀── phone dials ──│  phone APK   │
-│(Claude) │ ◀── stdout/code── │   (Node, :8080)      │ ── exec cmd ─────▶│ Shizuku→shell │
+│   AI    │ ──HTTPS+auth────▶ │     Go relay + MCP    │ ◀── phone dials ──│  phone APK   │
+│(Claude) │ ◀── stdout/code── │   (server/cmd/relay)  │ ── exec cmd ─────▶│ AdbShellClient│
 └─────────┘                   └──────────────────────┘                   └──────────────┘
-      ▲                              ▲        ▲
-      │ OAuth or Bearer AI_TOKEN     │        │ DEVICE_TOKEN (query param on the WS)
-      └── you control this token ────┘        └── shared secret baked into the agent
 ```
 
-Three parties, two trust boundaries:
-
-| Party | Talks to | Auth it presents |
-|---|---|---|
-| **AI / MCP client** | `POST /mcp` (HTTPS) | `Authorization: Bearer <AI_TOKEN>` **or** an OAuth access token |
-| **Phone agent** | `GET /agent` (WebSocket, outbound only) | `?token=<DEVICE_TOKEN>` |
-| **You (owner)** | consent page at `/oauth/authorize` | you paste `AI_TOKEN` once |
-
-Key properties:
-
-- **The phone never accepts inbound connections.** It dials *out* to the relay
-  and holds one WebSocket open, so it works behind CGNAT (e.g. SKT mobile),
-  with no VPN, no `adb`, no `sshd`, no port forwarding.
-- **The relay is stateless per request.** Each `POST /mcp` builds a fresh MCP
-  server instance; there are no MCP sessions to manage.
-- **Commands run as uid 2000 (shell)** via Shizuku's `UserService` — exactly the
-  privilege level of `adb shell`. Root-only operations do **not** work.
-- Output is capped at **256 KB per stream** (stdout and stderr each) on the
-  phone; overflow sets a `truncated` flag rather than erroring.
+- **The phone never accepts inbound connections.** It dials *out* to the
+  relay and holds one WebSocket open, so it works behind CGNAT.
+- **Commands run as uid 2000 (shell)** — the same privilege level as
+  `adb shell`. Root-only operations do not work.
+- **Output is capped at 256 KB per stream** (stdout/stderr) on the phone;
+  overflow sets a `truncated` flag rather than erroring.
+- The old design's Shizuku dependency is gone: the phone pairs with its own
+  `adbd` directly (§3), not through a separately-installed app.
 
 ---
 
-## 2. Deploy the relay + MCP server
+## 2. Deploy the relay
 
-### 2.1 Prerequisites
+### 2.1 Build
 
-- A small always-on host with Docker (any VPS works).
-- A hostname you control pointing at it, e.g. `mcp.example.com`, terminating TLS.
-  The examples assume **Traefik** in front, but any reverse proxy that supports
-  **WebSocket upgrades** works (nginx, Caddy). TLS is required — claude.ai only
-  connects to `https://` connectors, and phones dial `wss://`.
+```bash
+cd server
+go build -o relay ./cmd/relay
+go build -o publicserver ./cmd/publicserver
+```
+
+Or as containers:
+
+```bash
+docker build --target relay -t rishmcp-relay server
+docker build --target publicserver -t rishmcp-public server
+```
 
 ### 2.2 Configure env
 
-Copy `.env.example` to `.env` and fill it in (it's gitignored):
+See [Appendix B](#appendix-b-environment-variables) for the full list. At minimum:
+
+```bash
+AI_TOKEN=$(openssl rand -hex 32)      # master key for AI clients
+DEVICE_TOKEN=$(openssl rand -hex 24)  # shared secret the phone presents
+PUBLIC_URL=https://mcp.example.com    # external origin, for OAuth metadata/redirects
+TRUSTED_PROXIES=172.18.0.1          # optional proxy IP(s), comma-separated
+```
+
+### 2.3 Docker Compose with Traefik (recommended)
+
+The repository includes [`docker-compose.yml`](../docker-compose.yml), which
+builds the two Go Docker targets and keeps the relay trust boundary separate
+from the public APK server. It expects an external Traefik/Dokploy network:
 
 ```bash
 cp .env.example .env
-# generate strong secrets:
-echo "AI_TOKEN=$(openssl rand -hex 32)"      >> .env   # then edit the placeholder out
-echo "DEVICE_TOKEN=$(openssl rand -hex 24)"  >> .env
-```
+# Edit MCP_HOST and PUBLIC_MCP_HOST, then replace both token values.
+# Generate secrets with: openssl rand -hex 32
 
-```ini
-MCP_HOST=mcp.example.com          # private: MCP + device WebSocket
-PUBLIC_MCP_HOST=dl.example.com    # public: release metadata + APK, no secrets
-AI_TOKEN=<64 hex chars>           # the "master key" for AI clients — treat like an SSH key
-DEVICE_TOKEN=<48 hex chars>       # shared secret the phone presents on the WS
-# PUBLIC_URL is derived from MCP_HOST by docker-compose; only set it manually
-# if you run the server outside compose.
-```
-
-See [Appendix B](#appendix-b-environment-variables) for every variable.
-
-### 2.3 Bring it up
-
-```bash
+docker network create dokploy-network  # once, if it does not exist
 docker compose up -d --build
 ```
 
-`docker-compose.yml` sets `PUBLIC_URL=https://${MCP_HOST}` (so OAuth metadata and
-redirects are correct), mounts the built APK read-only for OTA, and attaches the
-Traefik router. The container listens on `:8080` internally; only Traefik is
-public.
+The relay is routed at `MCP_HOST` and receives `AI_TOKEN`/`DEVICE_TOKEN`.
+Set `TRUSTED_PROXIES` to the direct IP address(es) of the reverse proxy (comma-separated)
+when Traefik/nginx supplies `X-Forwarded-For`; with it empty, the server uses the
+socket peer address and ignores client-supplied forwarding headers. Configure the
+same variable on both relay and publicserver when both sit behind the same proxy.
+The publicserver is routed at `PUBLIC_MCP_HOST`, has no tokens, and serves
+only `/healthz`, `/api/version/release`, and `/agent.apk`. Traefik must expose
+the `websecure` entrypoint and the `letsencrypt` certificate resolver used by
+the labels in the Compose file. The Android WebSocket upgrade is handled by
+Traefik automatically.
 
-### 2.4 DNS + TLS
+### 2.4 Run one container manually
 
-Point an `A` record at the host for **both** names — `mcp.example.com` and
-`dl.example.com` → `<server-ip>`; Traefik issues a certificate per name. Behind
-Cloudflare, **orange-cloud (proxied) is fine** — HTTPS and WSS both ride `:443`,
-including the phone's `/agent` WebSocket. Traefik obtains the certificate via its
-configured resolver (Let's Encrypt in the sample labels).
+For local testing without Traefik, run the relay directly:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e AI_TOKEN="$AI_TOKEN" -e DEVICE_TOKEN="$DEVICE_TOKEN" \
+  -e PUBLIC_URL="$PUBLIC_URL" \
+  rishmcp-relay
+```
+
+For production, put a TLS reverse proxy in front of the container (nginx,
+Caddy, or Traefik) and forward WebSocket upgrades on `/agent`.
 
 ### 2.5 Verify
 
 ```bash
 curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":0,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
-#                    ↑ 0 until a phone connects (next section)
+# {"ok":true,"devices":0}
 ```
-
-If you get a TLS or 404 error, the proxy/DNS isn't routing yet — fix that before
-moving on.
 
 ---
 
-## 3. Install the agent on the phone
+## 3. Pair the Android agent
 
-The phone side is one APK. It needs **Shizuku** running (the app that hands out
-`adb shell`-level access without root). Install and start Shizuku first — via
-wireless debugging, a computer, or root.
+No Shizuku app to install. The APK pairs directly with the phone's own
+`adbd`. See [`docs/DESIGN.md` §3.1](DESIGN.md#31-셸-접근-페어링-shizuku-대체)
+for the full rationale; this is the practical walkthrough.
 
-### 3.1 Get the APK
+### 3.1 Android 11+ (wireless debugging pairing)
 
-Download the signed build from the newest release — either from GitHub or from your
-own public host, which serves the same bytes:
+1. On the phone: **Settings → Developer options → Wireless debugging → Pair
+   device with pairing code**. Note the port and 6-digit code shown.
+2. In the rish-mcp app's **ADB shell access** card, enter that port + code,
+   tap **Pair**.
+3. Go back to the main **Wireless debugging** screen and note the port shown
+   there (different from the pairing port — this one persists across
+   reconnects). Enter it in **Connect port**, tap **Save port**.
+4. Fill in **Relay URL** / **Device token** in the Configuration card, tap
+   **Save & Start**.
 
-```bash
-curl -sLO https://github.com/turin-dev/rish-mcp/releases/latest/download/rish-mcp-agent.apk
-curl -sO  https://dl.example.com/agent.apk        # same file, via your relay's public host
-```
+### 3.2 Android 11 미만 (USB + `adb tcpip` bridge)
 
-Or build it yourself (unsigned by the release key, so it cannot update an existing
-install):
+Wireless pairing doesn't exist before Android 11. Instead:
 
-```bash
-cd app && ./build-apk.sh        # runs the Android SDK + Gradle inside Docker
-# -> app/rish-mcp-agent.apk
-```
+1. Connect the phone to a PC over USB with USB debugging enabled.
+2. From the PC: `adb tcpip <port>` — this switches `adbd` to listen on that
+   TCP port instead of (or alongside) USB.
+3. In the app, enter that port under **Connect port** (no pairing
+   port/code needed on this path) and **Save port**.
 
-### 3.2 Headless install (recommended, no taps on the phone)
+**Known limitation:** depending on the ROM, this setting may not survive a
+reboot, requiring the PC+`adb tcpip` step to be repeated. This is a
+documented, accepted limitation (`docs/DESIGN.md` §7), not something the app
+works around.
 
-If you already have a Shizuku shell on the device (`rish` or `adb shell`), you
-can install and provision without touching the screen. `-g` grants Shizuku's
-runtime permission; the `am` extras provision the relay URL and token.
+### 3.3 Headless provisioning
 
-```bash
-TOKEN=<DEVICE_TOKEN>
-
-# 1. push + install with runtime perms granted
-rish -c 'cat > /data/local/tmp/r.apk' < app/rish-mcp-agent.apk
-rish -c 'pm install -r -g /data/local/tmp/r.apk; rm -f /data/local/tmp/r.apk'
-
-# 2. provision + start the foreground agent
-rish -c "am start -n kr.scin.rishmcp/.MainActivity \
-  --es relay wss://mcp.example.com/agent --es token $TOKEN --ez autostart true"
-```
-
-Provisioning extras understood by `MainActivity`:
-
-| Extra | Type | Meaning |
-|---|---|---|
-| `relay` | string (`--es`) | WebSocket URL, e.g. `wss://mcp.example.com/agent` |
-| `token` | string (`--es`) | the `DEVICE_TOKEN` |
-| `autostart` | bool (`--ez`) | start the foreground service immediately |
-
-To **re-point** an already-running agent at a new relay/token:
+The `am start` extras still work, now including `adbPort`:
 
 ```bash
-rish -c 'am force-stop kr.scin.rishmcp'   # it reads config fresh on next start
-rish -c "am start -n kr.scin.rishmcp/.MainActivity --es relay wss://NEW/agent --es token NEW --ez autostart true"
+adb shell am start -n kr.scin.rishmcp/.MainActivity \
+  --es relay wss://mcp.example.com/agent --es token <DEVICE_TOKEN> \
+  --ei adbPort <PORT> --ez autostart true
 ```
 
-### 3.3 Manual install
-
-Sideload the APK, open the app, tap **Grant Shizuku permission**, paste the relay
-URL + `DEVICE_TOKEN`, then **Save & Start**.
-
-### 3.4 What the agent does
-
-- Holds one outbound `wss://…/agent?token=…&deviceId=…&name=…&sdk=…&kind=…&ver=…&vc=…`
-  connection, reporting its form factor and APK version to the relay.
-- Runs as a **foreground service** (persistent notification) so Android won't kill
-  it, and **auto-starts on boot** via `BootReceiver`.
-- A watchdog reconnects on network changes or if Shizuku drops.
-- The relay pings every 25 s to keep the socket warm (60 s on Wear OS); a reconnect
-  with the same `deviceId` transparently replaces the stale socket.
-
-### 3.5 Confirm it's connected
-
-```bash
-curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1,...}   ← 1 means the phone's WebSocket is up
-```
-
-Or ask any connected AI to call `list_devices` (see below).
-
-### 3.6 OTA self-update
-
-The relay serves the mounted APK at `GET /agent.apk?t=<DEVICE_TOKEN>`, so a phone
-can update itself over the same channel — no `adb`/`sshd`:
-
-```bash
-rish -c 'curl -sfL "https://mcp.example.com/agent.apk?t=<DEVICE_TOKEN>" -o /data/local/tmp/r.apk \
-  && pm install -r -g /data/local/tmp/r.apk && rm -f /data/local/tmp/r.apk'
-```
-
-**Public downloads.** `PUBLIC_MCP_HOST` runs a second, separate container that serves
-the same APK with no token at `GET /agent.apk`, plus its metadata. It shares only the
-read-only APK volume — it cannot reach the relay, holds no tokens, and says nothing
-about connected devices. The download is rate limited per IP (`DOWNLOADS_PER_HOUR`).
-
-```bash
-curl -sO https://dl.example.com/agent.apk        # no token needed
-```
-
-**Knowing when to update.** Each agent reports its version when it connects, and the
-relay compares it against the build it ships. `list_devices()` marks anything older
-with `updateAvailable: true`, and the relay logs a warning on connect. Nothing updates
-itself — the install above is always a deliberate action.
-
-**Where "latest" comes from.** Both servers fetch the signed APK from the newest
-GitHub release, cache it, and parse the cached bytes — versions are not hardcoded
-anywhere. Publishing a release is the only step; nothing to bump, nothing to redeploy:
-
-```bash
-curl -s https://mcp.example.com/api/version/release
-# {"versionName":"0.5.0","versionCode":5,"source":"apk",
-#  "sizeBytes":5020238,"sha256":"06732f83…","modifiedAt":"2026-08-03T12:40:00.466Z",
-#  "download":"/agent.apk?t=<DEVICE_TOKEN>"}
-```
-
-Unauthenticated on purpose — a device has to be able to ask "is there a newer build?"
-before doing anything else. The download itself still needs `DEVICE_TOKEN`, and the
-published `sha256` lets a client verify what it got. The result is cached on the
-file's size and mtime, so this is cheap to poll.
-
-`source` tells you where the answer came from:
-
-| `source` | Meaning |
-|---|---|
-| `apk` | parsed from the fetched/cached release APK — the normal case |
-| `env` | `LATEST_AGENT_VERSION` / `LATEST_AGENT_VERSION_CODE` are set and win |
-| `fallback` | no readable APK at `APK_PATH`; the compiled-in value is being used, and the relay logs why |
-
-A `fallback` here means no release has been fetched and none is cached — version
-reporting is not trustworthy until one lands. The servers log why each attempt failed.
-
-`/healthz` carries the same numbers:
-
-```bash
-curl -s https://mcp.example.com/healthz
-# {"ok":true,"devices":1,"agent":{"latestVersion":"0.5.0","latestVersionCode":5}}
-```
-
-The APK must be signed with the same key as the installed one, or `pm install -r`
-fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Test APKs from pull-request CI use a
-disposable key and cannot update an official install — see [SIGNING.md](SIGNING.md).
+Pairing itself (entering the wireless pairing code) still needs a tap on the
+device the first time — see `docs/DESIGN.md`'s explicit non-goal: full
+headless/no-tap install is no longer a target now that Shizuku is gone.
 
 ---
 
 ## 4. Connect an AI client
 
-Two authentication styles are supported **in parallel**:
-
-- **Static bearer** — send `Authorization: Bearer <AI_TOKEN>`. Simplest; used by
-  Claude Code, the API, curl, and any client that lets you set a header.
-- **OAuth 2.0** — for clients that *only* speak OAuth, most importantly
-  **claude.ai custom connectors** (which drive the Claude web + mobile + desktop
-  apps). See [§4.3](#43-claudeai-custom-connector-oauth--incl-the-phone-app).
-
-### 4.1 Claude Code (CLI / desktop / web)
-
-One command:
+Static bearer:
 
 ```bash
 claude mcp add --transport http phone https://mcp.example.com/mcp \
   --header "Authorization: Bearer <AI_TOKEN>"
 ```
 
-Or drop it into `.mcp.json` (project) / your user MCP config:
-
-```json
-{
-  "mcpServers": {
-    "phone": {
-      "type": "http",
-      "url": "https://mcp.example.com/mcp",
-      "headers": { "Authorization": "Bearer <AI_TOKEN>" }
-    }
-  }
-}
-```
-
-### 4.2 Claude API / Agent SDK
-
-Use the MCP connector with a bearer header (the API calls your relay from
-Anthropic's servers, so the URL must be publicly reachable):
-
-```jsonc
-// messages request → "mcp_servers"
-{
-  "type": "url",
-  "url": "https://mcp.example.com/mcp",
-  "name": "phone",
-  "authorization_token": "<AI_TOKEN>"
-}
-```
-
-### 4.3 claude.ai custom connector (OAuth) — incl. the phone app
-
-claude.ai's custom-connector UI has **no field for a static bearer token**, so
-rish-mcp ships a small built-in OAuth 2.0 authorization server that the connector
-flow drives automatically. You never register a client or copy a client
-secret — the only thing you type is your `AI_TOKEN`, once, on a consent page.
-
-**Steps:**
-
-1. Go to **claude.ai → Settings → Connectors → Add custom connector**.
-2. **Name:** anything (e.g. "My phone"). **URL:** `https://mcp.example.com/mcp`.
-   Leave the advanced OAuth client ID/secret fields **blank**.
-3. Click **Add / Connect**. Claude discovers the OAuth endpoints, registers
-   itself dynamically, and sends you to the rish-mcp **consent page**.
-4. On the consent page, paste your `AI_TOKEN` and click **Authorize**.
-5. You're redirected back and the connector shows **Connected**. Enable it for a
-   chat via the connector/tools menu.
-
-Because Claude connects to your relay from **Anthropic's cloud** (not from the
-device), and the connector **syncs across web, desktop, and the mobile apps**,
-this works from anywhere — including the delightful case of the **Claude app on
-the very phone it is controlling**.
-
-> **Do not** run the relay with auth disabled just to satisfy a client. That
-> would expose shell access to your phone to anyone who finds the URL. The OAuth
-> layer exists precisely so you never have to.
-
-Details of the flow and its security properties are in [§6](#6-oauth-20-reference).
-
-### 4.4 Any other MCP client
-
-Anything that speaks **Streamable HTTP MCP** and can send an `Authorization`
-header works with the static-bearer style. Point it at `https://mcp.example.com/mcp`.
-
-### 4.5 Quick check without any AI
-
-```bash
-AI=<AI_TOKEN>
-curl -s https://mcp.example.com/mcp \
-  -H "Authorization: Bearer $AI" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
-       "params":{"name":"run_shell","arguments":{"cmd":"getprop ro.product.model"}}}'
-# -> exit=0 (…ms) / --- stdout --- / SM-S911N
-```
+Or claude.ai custom connectors (OAuth) — see [§6](#6-oauth-20-reference).
 
 ---
 
 ## 5. Tool reference
 
-The server advertises exactly two tools.
+Unchanged from the original design — this is the one part of the contract
+that stayed fixed across the rewrite.
 
 ### `list_devices()`
 
-No arguments. Returns a JSON array of connected devices:
-
 ```json
 [
-  { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android", "sdk": "36",
-    "agentVersion": "0.5.0", "agentVersionCode": 5,
-    "latestAgentVersion": "0.5.0", "updateAvailable": false,
+  { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android",
+    "sdk": "36", "agentVersion": "0.1.0", "agentVersionCode": 1,
     "connectedForMs": 84213, "pending": 0 }
 ]
 ```
 
-- `id` — device id; pass it to `run_shell` as `deviceId` when more than one device
-  is connected.
-- `kind` — `android` (phone/tablet) or `watch` (Wear OS).
-- `agentVersion` / `agentVersionCode` — the APK running on that device.
-  Agents installed before version reporting existed report `"unknown"` / `0`.
-- `updateAvailable` — that device runs an older agent than the APK the relay
-  currently serves, read live from that file. See [§ 3.6](#36-ota-self-update).
-- `pending` — commands currently in flight to that device.
-
-Call this first if you're unsure which device is online.
-
 ### `run_shell({ cmd, deviceId?, timeoutMs? })`
 
-Runs `cmd` on the phone as uid 2000 (via `sh -c`), like `adb shell`.
-
-| Param | Type | Default | Notes |
-|---|---|---|---|
-| `cmd` | string (required) | — | the shell command line, e.g. `dumpsys battery` |
-| `deviceId` | string | the sole device | **required** only when >1 phone is connected |
-| `timeoutMs` | int | `DEFAULT_TIMEOUT_MS` (60 000) | per-command; capped at `MAX_TIMEOUT_MS` (600 000) |
-
-**Return shape** (text content):
+Runs `cmd` on the phone as uid 2000. Returns:
 
 ```
 exit=<code> (<durationMs>ms)[ [output truncated]]
@@ -412,95 +203,51 @@ exit=<code> (<durationMs>ms)[ [output truncated]]
 <stderr>
 ```
 
-Behavior notes:
-
-- A **non-zero exit code** sets the MCP result's `isError: true` — the command
-  still ran; the flag just signals failure to the model.
-- **Timeout:** the phone force-kills the process at `timeoutMs` (exit `-1`); the
-  relay adds a 2 s grace before giving up on the round trip.
-- **Truncation:** stdout/stderr are each capped at 256 KB on the phone; overflow
-  (or a killed process) sets the `[output truncated]` marker.
-- **Device selection:** omit `deviceId` when exactly one phone is connected. With
-  none connected you get `no phone is connected to the relay`; with several,
-  `multiple devices connected; pass deviceId`.
+A non-zero exit code sets `isError: true`. `deviceId` is required only when
+more than one device is connected.
 
 ---
 
 ## 6. OAuth 2.0 reference
 
-The server implements just enough of OAuth for MCP clients, and no more. It is
-**single-user by design**: "logging in" means typing the relay's `AI_TOKEN` once.
-
-### Endpoints
+Ported to Go (`server/internal/oauth`), same model as the original design:
+single-user, no database, every issued token is an HMAC-signed string
+derived from `AI_TOKEN`. Rotating `AI_TOKEN` revokes everything at once.
 
 | Endpoint | Spec | Purpose |
 |---|---|---|
 | `GET /.well-known/oauth-authorization-server[/…]` | RFC 8414 | authorization-server metadata |
-| `GET /.well-known/oauth-protected-resource[/…]` | RFC 9728 | resource metadata (the `/mcp` resource → issuer) |
-| `POST /oauth/register` | RFC 7591 | dynamic client registration (public clients) |
-| `GET /oauth/authorize` | OAuth 2.0 | renders the consent page |
-| `POST /oauth/authorize` | — | consent submit (checks `AI_TOKEN`), redirects with a code |
-| `POST /oauth/token` | OAuth 2.0 | `authorization_code` + `refresh_token` grants |
+| `GET /.well-known/oauth-protected-resource[/…]` | RFC 9728 | resource metadata |
+| `POST /oauth/register` | RFC 7591 | dynamic client registration |
+| `GET /oauth/authorize` | OAuth 2.0 | consent page |
+| `POST /oauth/authorize` | — | consent submit (checks `AI_TOKEN`) |
+| `POST /oauth/token` | OAuth 2.0 | `authorization_code` + `refresh_token` |
 
-A `401` from `POST /mcp` carries `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`, which is how an OAuth-capable client discovers the flow.
+PKCE (S256) is mandatory. Auth codes are single-use with a 5-minute TTL.
+Consent submissions are rate-limited per IP (10 attempts / 5 min). Default
+token lifetimes: access 1h, refresh 90d.
 
-### The flow
-
-```
-client → POST /oauth/register {redirect_uris}            → client_id
-client → GET  /oauth/authorize?client_id&redirect_uri
-              &code_challenge&code_challenge_method=S256   → consent page
-you    → POST /oauth/authorize  (paste AI_TOKEN)           → 302 redirect_uri?code=…&state=…
-client → POST /oauth/token grant=authorization_code
-              code, code_verifier, redirect_uri            → {access_token, refresh_token}
-client → POST /mcp  Authorization: Bearer <access_token>   → tools work
-client → POST /oauth/token grant=refresh_token …           → fresh access_token
-```
-
-### Token & security model
-
-- **No database.** Every issued value (`client_id`, auth code, access token,
-  refresh token) is a self-describing string signed with an HMAC key **derived
-  from `AI_TOKEN`**. The server keeps no per-client state.
-- **Rotating `AI_TOKEN` revokes everything at once** — the signing key changes, so
-  all previously issued tokens fail verification immediately.
-- **PKCE (S256) is mandatory.** Authorization without a valid `code_challenge`
-  is rejected; the token endpoint verifies the `code_verifier`.
-- **Auth codes are single-use** (5-minute TTL) and bound to the exact
-  `redirect_uri` and PKCE challenge.
-- **Consent is the only place the real secret is compared**, and it is rate-limited
-  per IP (10 attempts / 5 min).
-- Registration and the consent page are open (public clients only), but
-  possessing a `client_id` grants nothing without the token-paste step.
-- Default token lifetimes: access **1 h**, refresh **90 d** (both configurable in
-  `OAuthProvider`).
-
-This is intentionally minimal — good enough to let first-party Claude clients
-connect to *your own* single-tenant relay. It is not a multi-tenant IdP.
+For claude.ai: **Settings → Connectors → Add custom connector**, URL
+`https://mcp.example.com/mcp`, leave client ID/secret blank. You'll land on
+the consent page — paste `AI_TOKEN` once.
 
 ---
 
-## 7. Recipes: natural language → shell
+## 7. Official version server
 
-Once connected, you just ask in plain language and Claude picks the command.
-Everything an `adb shell` can do is available: `pm`, `am`, `dumpsys`, `settings`,
-`cmd`, `input`, `screencap`, `logcat`, and file access under `/sdcard`.
+`server/cmd/publicserver` — a separate, secret-free binary/container.
 
-| You ask | Roughly runs |
-|---|---|
-| "What's my battery level and is it charging?" | `dumpsys battery` |
-| "Is the screen on right now?" | `dumpsys power \| grep -i wakefulness` |
-| "List the apps I installed myself." | `pm list packages -3` |
-| "How much free storage do I have?" | `df -h /data` |
-| "Take a screenshot." | `screencap -p /sdcard/s.png` (then read/pull it) |
-| "Silence the phone." | `cmd notification set_dnd on` |
-| "Open Google Maps." | `am start -a android.intent.action.VIEW -d geo:0,0` |
-| "What Wi-Fi am I on?" | `dumpsys wifi \| grep -i ssid` |
-| "Show the last 50 lines of logcat for MyApp." | `logcat -d -t 50 \| grep MyApp` |
-| "Type 'hello' into the focused field." | `input text hello` |
+```bash
+curl -s https://dl.example.com/api/version/release
+# {"versionName":"0.1.0","versionCode":1,"tag":"v0.1.0",
+#  "sizeBytes":...,"sha256":"...","modifiedAt":"...","download":"/agent.apk"}
 
-Root-only things (writing outside app/shell-accessible paths, editing protected
-system settings) won't work — that's the uid-2000 boundary, same as `adb`.
+curl -sO https://dl.example.com/agent.apk    # no token needed
+```
+
+It polls GitHub for the newest release with a `.apk` asset, caches it, and
+keeps serving the last-good copy if a fetch or parse fails. It has no route
+to the relay and holds no tokens or device information.
 
 ---
 
@@ -508,108 +255,56 @@ system settings) won't work — that's the uid-2000 boundary, same as `adb`.
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `healthz` shows `"devices":0` | Phone agent not connected. Check Shizuku is running, the foreground notification is present, and `relay`/`token` are correct. Re-provision (§3.2). |
-| `run_shell` → `no phone is connected to the relay` | Same as above — the WS dropped. The watchdog should reconnect; force with `am force-stop` + restart. |
-| `multiple devices connected; pass deviceId` | Call `list_devices` and pass the right `deviceId`. |
-| claude.ai connector never reaches the consent page | `PUBLIC_URL` wrong → metadata/redirect mismatch. It must equal the exact external origin (`https://mcp.example.com`). Check `GET /.well-known/oauth-authorization-server`. |
-| claude.ai says the connector is unreachable | Relay not public over HTTPS, or the proxy blocks the well-known paths / `POST` bodies. Verify with the curl checks in §2.5 and §4.5. |
-| `401` on `POST /mcp` with a token you expect to work | Token was signed under an **old** `AI_TOKEN` (rotated), or you're sending the `DEVICE_TOKEN` by mistake. Re-issue via the OAuth flow or use the current `AI_TOKEN`. |
-| `[output truncated]` | Output exceeded 256 KB/stream. Narrow the command (`head`, `grep`, `-t N`). |
-| Command exits `-1` after a delay | Hit the timeout; raise `timeoutMs` (up to `MAX_TIMEOUT_MS`) or make the command return faster. |
-| WebSocket won't upgrade | Proxy not forwarding `Upgrade`/`Connection` headers for `/agent`. Enable WS support on the reverse proxy. |
-
-Server logs: `docker compose logs -f rish-mcp`.
-
----
-
-## 9. Security & threat model
-
-- **`AI_TOKEN` is a master key.** Anyone holding it — or any live OAuth token
-  derived from it — can run shell commands (uid 2000) on your phone. Treat it
-  exactly like an SSH private key. Never commit it; `.env` is gitignored.
-- **`DEVICE_TOKEN` gates who may register as a phone.** Leaking it lets an
-  attacker impersonate a device (present a fake phone), not run commands on yours.
-- **The phone trusts only the relay it dials.** It never listens for inbound
-  connections, so there's no attack surface on the device itself over the network.
-- **The relay is a high-value target**: it can command every connected phone.
-  Keep it patched, keep TLS on, and don't expose `:8080` directly — only via the
-  proxy.
-- **Scope is the owner's own device** for personal automation. Don't point this
-  at devices you don't own or don't have authorization to control.
-- **Blast radius of a compromised token** = whatever `adb shell` can do: read
-  `/sdcard`, list/inspect apps, change many settings, drive the UI, capture the
-  screen. Not root, but not nothing. Rotate promptly if you suspect exposure
-  (§10).
-
----
-
-## 10. Rotating & revoking access
-
-Because all AI-side credentials derive from `AI_TOKEN`, rotation is one step and
-revokes **everything** (static bearer users and every OAuth token/refresh token):
-
-```bash
-# 1. new secret
-sed -i "s/^AI_TOKEN=.*/AI_TOKEN=$(openssl rand -hex 32)/" .env
-# 2. restart to load it
-docker compose up -d
-```
-
-After this:
-
-- Update Claude Code / API configs with the new `AI_TOKEN`.
-- Re-authorize the claude.ai connector (it will hit the consent page again; paste
-  the new token).
-
-To rotate the **phone** credential, change `DEVICE_TOKEN` in `.env`, restart, then
-re-provision the agent (§3.2) with the new token.
+| `healthz` shows `"devices":0` | Phone agent not connected. Check the app's ADB shell status row and relay/token config. |
+| `run_shell` → `no device is connected to the relay` | Same as above — WS dropped, or never connected. |
+| `run_shell` → `multiple devices connected; pass deviceId` | Call `list_devices` and pass the right `deviceId`. |
+| App shows `ADB shell: pairing failed` | Wrong pairing port/code, or the pairing window expired — re-open Wireless debugging pairing and retry. |
+| App shows `ADB shell: connect failed` | Connect port is stale (Wireless debugging port rotates on some ROMs after reboot) — recheck the port in Settings and re-save. |
+| `401` on `POST /mcp` | Token signed under an old `AI_TOKEN` (rotated), or sending `DEVICE_TOKEN` by mistake. |
+| `[output truncated]` | Output exceeded 256 KB/stream. Narrow the command. |
 
 ---
 
 ## Appendix A: WS relay protocol
 
-The phone↔relay messages are newline-free JSON frames over the WebSocket.
-
-**Relay → phone (run a command):**
+Unchanged from the original design (`server/internal/relay`):
 
 ```json
-{ "type": "exec", "reqId": "<uuid>", "cmd": "getprop ro.product.model", "timeoutMs": 60000 }
-```
+// relay → device
+{ "type": "exec", "reqId": "<uuid>", "cmd": "...", "timeoutMs": 60000 }
 
-**Phone → relay (result):**
-
-```json
+// device → relay
 { "type": "result", "reqId": "<uuid>", "code": 0,
-  "stdout": "SM-S911N\n", "stderr": "", "truncated": false, "durationMs": 127 }
+  "stdout": "...", "stderr": "", "truncated": false, "durationMs": 127 }
 ```
 
-Connection query params on `GET /agent`: `token` (required, = `DEVICE_TOKEN`),
-`deviceId` (optional; server assigns a UUID if absent), `name`, `sdk`, `kind`
-(`android` or `watch`; anything else is coerced to `android`), `ver` (agent
-versionName) and `vc` (agent versionCode). All but `token` are optional — an agent
-that omits `ver`/`vc` is recorded as version `unknown` and flagged as outdated.
-
-The relay pings every 25 s (60 s for `kind=watch`) and terminates a connection that
-misses ~2.5 ping cycles. A reconnect with an existing `deviceId` replaces the old
-socket and fails its in-flight commands with `device reconnected`.
+Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
+`kind` (`android` or `watch`), `ver`, `vc`. Ping interval: 25s general / 60s
+`kind=watch`; a device missing ~2.5 ping cycles is dropped.
 
 ## Appendix B: environment variables
 
+### `server/cmd/relay`
+
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `AI_TOKEN` | ✅ | — | Bearer secret for AI clients; also the OAuth signing seed and consent password |
-| `DEVICE_TOKEN` | ✅ | — | Shared secret the phone presents on the `/agent` WebSocket |
-| `PUBLIC_URL` | for OAuth | `http://localhost:<PORT>` | External `https://` origin used in OAuth metadata + redirects. Compose sets it from `MCP_HOST` |
-| `MCP_HOST` | compose | — | Public hostname; Traefik routing + derives `PUBLIC_URL` |
-| `PORT` | | `8080` | Internal listen port |
+| `AI_TOKEN` | ✅ | — | Bearer secret for AI clients; also the OAuth signing seed |
+| `DEVICE_TOKEN` | ✅ | — | Shared secret the phone presents on `/agent` |
+| `PUBLIC_URL` | for OAuth | `http://localhost:$PORT` | External origin for OAuth metadata/redirects |
+| `TRUSTED_PROXIES` | | empty | Comma-separated proxy IPs allowed to set `X-Forwarded-For` |
+| `PORT` | | `8080` | Listen port |
 | `DEFAULT_TIMEOUT_MS` | | `60000` | Default per-command timeout |
 | `MAX_TIMEOUT_MS` | | `600000` | Ceiling for a caller-supplied `timeoutMs` |
-| `APK_PATH` | | — | Serve this local APK instead of fetching a release. Dev/test escape hatch; disables GitHub polling |
+
+### `server/cmd/publicserver`
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `PORT` | | `8080` | Listen port |
+| `TRUSTED_PROXIES` | | empty | Comma-separated proxy IPs allowed to set `X-Forwarded-For` |
+| `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on `/agent.apk` |
 | `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose latest release supplies the APK |
 | `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |
 | `RELEASE_POLL_MS` | | `900000` | How often to check GitHub for a newer release |
 | `GITHUB_API_BASE` | | `https://api.github.com` | Overridable for testing |
-| `PUBLIC_MCP_HOST` | compose | — | Public hostname for the release/APK container |
-| `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on the public, tokenless APK download |
-| `LATEST_AGENT_VERSION` | | read from the APK at `APK_PATH` | Overrides the version name devices are compared against for `updateAvailable` |
-| `LATEST_AGENT_VERSION_CODE` | | read from the APK at `APK_PATH` | Overrides the version code devices are compared against for `updateAvailable` |
+| `APK_PATH` | | — | Serve this local APK instead of fetching a release; disables GitHub polling |
