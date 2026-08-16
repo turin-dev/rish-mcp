@@ -107,7 +107,7 @@ run_shell({ cmd: string, deviceId?: string, timeoutMs?: number })
 
 list_devices()
   → [{ id, name, kind, sdk, agentVersion, agentVersionCode,
-       latestAgentVersion, updateAvailable, connectedForMs, pending }]
+       connectedForMs, pending }]
 ```
 
 저사양 기기 경로에서도 응답 shape은 동일하다 — 다만 FCM 웨이크업 때문에 첫 명령의
@@ -144,7 +144,7 @@ list_devices()
 ### 공식 버전 서버 API
 
 ```
-GET /api/version/release  → { versionName, versionCode, source, sizeBytes, sha256, modifiedAt, download }
+GET /api/version/release  → { versionName, versionCode, tag, sizeBytes, sha256, modifiedAt, download }
 GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 ```
 
@@ -186,9 +186,9 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 - **Android 앱은 실기기 미검증**: `AdbShellClient`/`ConnectionManager`/
   `MainActivity`는 컴파일·유닛 테스트(순수 로직 부분만)는 통과했지만, 실제 무선
   페어링·연결·명령 실행은 이 개발 환경에 연결된 Android 기기가 없어 검증하지 못함
-- **Go 서버 배포 구성 미완성**: `server/Dockerfile`로 두 바이너리 이미지는 빌드
-  되지만, 리버스 프록시/docker-compose 설정은 기존 `before/docker-compose.yml`
-  (Traefik 기반)을 그대로 재현하지 않았음
+- **Go 서버 배포 구성 완료**: `server/Dockerfile`로 두 바이너리 이미지 빌드,
+  `docker-compose.yml`(repo 루트)로 Traefik/Dokploy 배포 구성 완료. 컨테이너는
+  `read_only: true` + `tmpfs` + non-root `USER appuser`(uid 10001)로 하드닝됨
 
 ---
 ## 8. 구현 로드맵 (제안 순서)
@@ -206,4 +206,11 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 6. ✅ (코드 기준) Android 11 미만 USB 경로 — `MainActivity`/`Prefs.adbPort`가 이미
    host-agnostic이라 pre-11 사용자는 PC+adb로 얻은 포트만 입력하면 됨. PC+adb
    tcpip 브리지 자체는 사용자가 수행하는 수동 단계라 앱 코드로 검증할 대상이 아님
-7. ✅ 통합 문서화 — `README.md`, `docs/USAGE.md` 재작성, 이 로드맵 갱신
+8. ✅ CLI 설정 도구 — `server/cmd/setup` (Go 바이너리) + `cli/` (Node.js,
+   `npx rish-mcp-setup`), APK 다운로드/로컬 빌드/릴레이 실행
+9. ✅ 로그 인젝션 수정 — `ws.go`의 deviceId 로깅에 `sanitizeLogField` 적용,
+   회귀 테스트(`TestRegisterAgentLogInjection`) 추가
+10. ✅ 테스트 커버리지 86.6% — `internal/mcp`/`internal/oauth`/`internal/relay` 100%,
+    `internal/release` 99.3%, `cmd/publicserver` 80.8%, `cmd/relay` 81.8%, `cmd/setup` 66.5%
+11. ✅ Docker 컨테이너 하드닝 — non-root `USER appuser`, `read_only: true`,
+    `tmpfs: /tmp:size=64M,noexec,nosuid,nodev`
