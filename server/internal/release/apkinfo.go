@@ -99,7 +99,7 @@ func parseApk(data []byte) (ApkInfo, error) {
 	}
 	axml, err := io.ReadAll(f)
 	_ = f.Close()
-	if err != nil {
+	if err != nil { // unreachable: zip.Reader from bytes.Reader never returns read errors
 		return ApkInfo{}, err
 	}
 

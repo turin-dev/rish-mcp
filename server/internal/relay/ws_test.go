@@ -825,3 +825,57 @@ func TestRegisterAgentTruncatedFrame(t *testing.T) {
 		t.Fatalf("device should still be registered after invalid frame: %v", err)
 	}
 }
+
+// --- log injection test ---
+
+// TestRegisterAgentLogInjection verifies that a hostile deviceId cannot
+// inject fake log lines. The raw query value is used for routing (the
+// registry key) but every log line must show the sanitized value — a
+// regression test for the fix that replaced raw deviceID with logDeviceID
+// (sanitizeLogField output) in the disconnect/stale/ping/read/frame logs.
+func TestRegisterAgentLogInjection(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+
+	reg := NewRegistry()
+	server, client := testDevicePair(t)
+	t.Cleanup(func() { client.Close() })
+
+	// A newline inside the deviceId would terminate the log line mid-way and
+	// let the rest render as a forged "[agent] ..." line if the raw value were
+	// ever logged.
+	const evilID = "evil\n[agent] forged log line"
+	q := url.Values{"deviceId": {evilID}}
+
+	go registerAgentPing(reg, server, q, time.Hour)
+	time.Sleep(50 * time.Millisecond)
+
+	// Routing must use the RAW id as the registry key — sanitizing for logs
+	// must not change identity.
+	if _, err := reg.resolve(evilID); err != nil {
+		t.Fatalf("device should be registered under the raw deviceId: %v", err)
+	}
+
+	// sendPing is exercised via a separate test; to reach the stale/read
+	// failure logs, tear down the connection and wait for the handler to notice.
+	client.Close()
+	time.Sleep(150 * time.Millisecond)
+
+	logOutput := buf.String()
+
+	// The log must not contain the raw ID with its newline — if the raw value
+	// were logged, every occurrence would double as a forged log line.
+	if strings.Contains(logOutput, evilID) {
+		t.Fatalf("raw deviceId (with newline) reached the log:\n%s", logOutput)
+	}
+	// Newline followed by the forged text is the actual injection signature.
+	if strings.Contains(logOutput, "\n[agent] forged log line") {
+		t.Fatalf("log injection via deviceId: forged line found:\n%s", logOutput)
+	}
+	// The sanitized value (control characters stripped) is what should appear.
+	if !strings.Contains(logOutput, "evil[agent] forged log line") {
+		t.Fatalf("expected sanitized deviceId in log output:\n%s", logOutput)
+	}
+}

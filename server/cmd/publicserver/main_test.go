@@ -137,6 +137,169 @@ func TestPublicServerDoesNotExposeRelayRoutes(t *testing.T) {
 	}
 }
 
+// --- happy-path handlers + env helpers (Task #20: dead-code documentation) --
+
+// writeCachedRelease seeds a Source's cache dir with a real APK + release.json.
+// The caller MUST call src.Start(ctx) before the handlers will serve the
+// cached release (loadCache runs inside Start).
+func writeCachedRelease(t *testing.T, versionName string) *release.Source {
+	t.Helper()
+	apkBytes := buildManifestAPK(t, 7, versionName)
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "agent.apk"), apkBytes, 0o644); err != nil {
+		t.Fatalf("write apk: %v", err)
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"tag":       "v2.0.0",
+		"fetchedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err := os.WriteFile(filepath.Join(cacheDir, "release.json"), meta, 0o644); err != nil {
+		t.Fatalf("write release.json: %v", err)
+	}
+	return release.NewSource(release.SourceOptions{CacheDir: cacheDir, PollEvery: time.Hour})
+}
+
+func TestHealthzWithRelease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := writeCachedRelease(t, "2.0.0")
+	src.Start(ctx)
+	mux := newMux(src, 30, "")
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz with release: expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode healthz body: %v", err)
+	}
+	if body["ok"] != true {
+		t.Errorf("healthz body ok = %v, want true", body["ok"])
+	}
+	if body["release"] != "2.0.0" {
+		t.Errorf("healthz body release = %v, want 2.0.0", body["release"])
+	}
+}
+
+func TestVersionHandlerWithRelease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := writeCachedRelease(t, "2.3.4")
+	src.Start(ctx)
+	mux := newMux(src, 30, "")
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/version/release")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("version with release: expected 200, got %d", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=60" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "public, max-age=60")
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var body struct {
+		VersionName string `json:"versionName"`
+		VersionCode int    `json:"versionCode"`
+		Tag         string `json:"tag"`
+		Download    string `json:"download"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode version body: %v", err)
+	}
+	if body.VersionName != "2.3.4" || body.VersionCode != 7 || body.Tag != "v2.0.0" || body.Download != "/agent.apk" {
+		t.Errorf("version body = %+v, want versionName=2.3.4 versionCode=7 tag=v2.0.0 download=/agent.apk", body)
+	}
+}
+
+func TestAgentApkHandlerNoRelease503(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := release.NewSource(release.SourceOptions{CacheDir: t.TempDir(), PollEvery: time.Hour})
+	src.Start(ctx)
+	mux := newMux(src, 30, "")
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/agent.apk")
+	if err != nil {
+		t.Fatalf("GET /agent.apk: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no release, got %d", resp.StatusCode)
+	}
+}
+
+func TestAgentApkHandlerRateLimited429(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := writeCachedRelease(t, "2.0.0")
+	src.Start(ctx)
+	// perHour=1: the first download passes, the second from the same IP is limited.
+	mux := newMux(src, 1, "")
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	first, err := http.Get(srv.URL + "/agent.apk")
+	if err != nil {
+		t.Fatalf("first GET /agent.apk: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first download: expected 200, got %d", first.StatusCode)
+	}
+
+	second, err := http.Get(srv.URL + "/agent.apk")
+	if err != nil {
+		t.Fatalf("second GET /agent.apk: %v", err)
+	}
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second download: expected 429, got %d", second.StatusCode)
+	}
+}
+
+func TestEnvOr(t *testing.T) {
+	t.Setenv("PUBLICSERVER_ENVOR_SET", "from-env")
+	// Shadow any machine-global value so the test is deterministic.
+	t.Setenv("PUBLICSERVER_ENVOR_UNSET", "")
+	if got := envOr("PUBLICSERVER_ENVOR_SET", "fallback"); got != "from-env" {
+		t.Errorf("envOr with env set = %q, want from-env", got)
+	}
+	if got := envOr("PUBLICSERVER_ENVOR_UNSET", "fallback"); got != "fallback" {
+		t.Errorf("envOr with env unset = %q, want fallback", got)
+	}
+}
+
+func TestEnvInt(t *testing.T) {
+	t.Setenv("PUBLICSERVER_ENVINT_VALID", "42")
+	t.Setenv("PUBLICSERVER_ENVINT_INVALID", "not-a-number")
+	t.Setenv("PUBLICSERVER_ENVINT_UNSET", "")
+	if got := envInt("PUBLICSERVER_ENVINT_VALID", 1); got != 42 {
+		t.Errorf("envInt valid = %d, want 42", got)
+	}
+	if got := envInt("PUBLICSERVER_ENVINT_INVALID", 1); got != 1 {
+		t.Errorf("envInt invalid = %d, want fallback 1", got)
+	}
+	if got := envInt("PUBLICSERVER_ENVINT_UNSET", 1); got != 1 {
+		t.Errorf("envInt unset = %d, want fallback 1", got)
+	}
+}
+
 // TestSourceStartStop confirms Start()/cancel() against an unreachable API
 // doesn't hang or panic the background poller.
 func TestSourceStartStop(t *testing.T) {

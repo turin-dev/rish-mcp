@@ -213,7 +213,7 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 			close(done)
 			reg.disconnect(d, ErrDeviceDisconnected)
 			_ = conn.Close()
-			log.Printf("[agent] disconnected: %s", deviceID)
+			log.Printf("[agent] disconnected: %s", logDeviceID)
 		})
 	}
 	defer closeConn()
@@ -237,12 +237,12 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 				stale := time.Since(d.lastSeen) > staleAfter
 				d.mu.Unlock()
 				if stale {
-					log.Printf("[agent] stale, terminating: %s (no traffic for %s)", deviceID, staleAfter)
+					log.Printf("[agent] stale, terminating: %s (no traffic for %s)", logDeviceID, staleAfter)
 					closeConn()
 					return
 				}
 				if err := sendPing(conn, &d.writeMu); err != nil {
-					log.Printf("[agent] ping failed for %s: %v", deviceID, err)
+					log.Printf("[agent] ping failed for %s: %v", logDeviceID, err)
 					closeConn()
 					return
 				}
@@ -253,7 +253,7 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[agent] read failed for %s: %v", deviceID, err)
+			log.Printf("[agent] read failed for %s: %v", logDeviceID, err)
 			return
 		}
 		d.mu.Lock()
@@ -267,7 +267,7 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 			if len(frame) > maxLoggedFrame {
 				frame = frame[:maxLoggedFrame] + "..."
 			}
-			log.Printf("[agent] invalid result frame from %s: %v (frame=%q)", deviceID, err, frame)
+			log.Printf("[agent] invalid result frame from %s: %v (frame=%q)", logDeviceID, err, frame)
 			continue
 		}
 		if msg.Type == "result" && msg.ReqID != "" {

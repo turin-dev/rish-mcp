@@ -81,6 +81,11 @@ var stdin = bufio.NewReader(os.Stdin)
 // its default instead of blocking on stdin -- see prompt().
 var nonInteractive bool
 
+// Test seams: runDeviceSetup's device-poll loop normally sleeps ~2s between
+// attempts and gives up after 15. Tests shrink both so the loop runs fast.
+var devicePollInterval = 2 * time.Second
+var devicePollAttempts = 15
+
 func prompt(label string) string {
 	if nonInteractive {
 		// promptDefault/promptYesNo both route through here and treat ""
@@ -216,10 +221,10 @@ func runDeviceSetup(serverURL string) error {
 	fmt.Println("Plug the phone in over USB and enable USB debugging (Settings → Developer")
 	fmt.Println("options → USB debugging), or make sure it's already reachable over adb.")
 	deviceFound := false
-	for attempt := 0; !nonInteractive || attempt < 15; attempt++ { // ~30s of polling, not a busy-loop, in agent mode
+	for attempt := 0; !nonInteractive || attempt < devicePollAttempts; attempt++ { // ~30s of polling, not a busy-loop, in agent mode
 		if nonInteractive {
 			if attempt > 0 {
-				time.Sleep(2 * time.Second)
+				time.Sleep(devicePollInterval)
 			}
 		} else {
 			prompt(dim("press enter once it's connected"))
@@ -238,7 +243,7 @@ func runDeviceSetup(serverURL string) error {
 		break
 	}
 	if !deviceFound {
-		return fmt.Errorf("no device showed up on `adb devices` after 15 attempts (non-interactive mode doesn't wait forever)")
+		return fmt.Errorf("no device showed up on `adb devices` after %d attempts (non-interactive mode doesn't wait forever)", devicePollAttempts)
 	}
 
 	step(2, "Android version")
@@ -475,8 +480,13 @@ func platformToolsURL() (string, error) {
 	}
 }
 
+// platformToolsURLFunc is a test seam: it defaults to platformToolsURL but
+// tests can swap it for a local server to exercise downloadPlatformTools
+// end-to-end without touching dl.google.com.
+var platformToolsURLFunc = platformToolsURL
+
 func downloadPlatformTools(cacheDir string) (string, error) {
-	url, err := platformToolsURL()
+	url, err := platformToolsURLFunc()
 	if err != nil {
 		return "", err
 	}

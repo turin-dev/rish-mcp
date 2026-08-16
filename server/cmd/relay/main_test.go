@@ -122,6 +122,10 @@ func TestMCPRejectsOversizedBody(t *testing.T) {
 
 // fakeAgent answers every "exec" frame with a canned successful result,
 // standing in for the Android app during this skeleton stage.
+//
+// The fields the test wants back (code, stdout, stderr, truncated) can be
+// smuggled in on the exec frame itself; absent fields keep the original
+// defaults so legacy round-trip expectations still hold.
 func fakeAgent(conn *websocket.Conn) {
 	for {
 		_, raw, err := conn.ReadMessage()
@@ -135,13 +139,70 @@ func fakeAgent(conn *websocket.Conn) {
 		if req["type"] != "exec" {
 			continue
 		}
+		code, _ := req["code"].(float64)
+		stdout := "SM-TEST\n"
+		if v, ok := req["stdout"].(string); ok && v != "" {
+			stdout = v
+		}
+		stderr := ""
+		if v, ok := req["stderr"].(string); ok {
+			stderr = v
+		}
+		truncated := false
+		if v, ok := req["truncated"].(bool); ok {
+			truncated = v
+		}
 		resp := map[string]any{
-			"type": "result", "reqId": req["reqId"], "code": 0,
-			"stdout": "SM-TEST\n", "stderr": "", "truncated": false, "durationMs": 5,
+			"type": "result", "reqId": req["reqId"], "code": code,
+			"stdout": stdout, "stderr": stderr, "truncated": truncated, "durationMs": 5,
 		}
 		b, _ := json.Marshal(resp)
 		_ = conn.WriteMessage(websocket.TextMessage, b)
 	}
+}
+
+// newTestServer wires up a relay mux without any device and hands back the
+// registry (for dialing fake agents) plus the running server.
+func newTestServer(t *testing.T) (*relay.Registry, *httptest.Server) {
+	t.Helper()
+	reg := relay.NewRegistry()
+	mux := newMux(reg, testOAuthProvider(), "ai-token", "device-token", 5*time.Second, 30*time.Second)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return reg, srv
+}
+
+// rawMCPRequest sends a bare HTTP request to the relay with a valid AI bearer
+// token; bodies are sent verbatim (possibly malformed on purpose).
+func rawMCPRequest(t *testing.T, base, method, path, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, base+path, bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer ai-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// beginAgent dials /agent with the given device ID and starts answering exec
+// frames, returning the connection.
+func beginAgent(t *testing.T, base, deviceID string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(base, "http") +
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=0.1.0&vc=1"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial agent: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	go fakeAgent(conn)
+	return conn
 }
 
 func waitForDevices(t *testing.T, base string, want int) {
@@ -320,4 +381,167 @@ func TestLoadConfigAcceptsTrustedProxiesWithSpaces(t *testing.T) {
 			t.Fatalf("unexpected trustedProxies: %q", cfg.trustedProxies)
 		}
 	})
+}
+
+// --- envDurationMs tests ----------------------------------------------------
+
+func TestEnvDurationMs(t *testing.T) {
+	t.Setenv("EDM_KEY", "5000")
+	if d := envDurationMs("EDM_KEY", 1000); d != 5*time.Second {
+		t.Fatalf("expected 5s, got %v", d)
+	}
+	t.Setenv("EDM_KEY", "not-a-number")
+	if d := envDurationMs("EDM_KEY", 1000); d != 1*time.Second {
+		t.Fatalf("expected 1s fallback on invalid, got %v", d)
+	}
+	os.Unsetenv("EDM_KEY")
+	if d := envDurationMs("EDM_KEY", 1000); d != 1*time.Second {
+		t.Fatalf("expected 1s fallback on unset, got %v", d)
+	}
+}
+
+// --- MCP handler edge cases ------------------------------------------------
+
+func TestMCPMethodNotAllowed(t *testing.T) {
+	_, srv := newTestServer(t)
+	resp := rawMCPRequest(t, srv.URL, http.MethodGet, "/mcp", "")
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET /mcp, got %d", resp.StatusCode)
+	}
+}
+
+func TestMCPParseError(t *testing.T) {
+	_, srv := newTestServer(t)
+	resp := rawMCPRequest(t, srv.URL, http.MethodPost, "/mcp", `{invalid json}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d", resp.StatusCode)
+	}
+}
+
+func TestMCPNotification(t *testing.T) {
+	_, srv := newTestServer(t)
+	body := `{"jsonrpc":"2.0","method":"notifications/initialized"}`
+	resp := rawMCPRequest(t, srv.URL, http.MethodPost, "/mcp", body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202 for notification, got %d", resp.StatusCode)
+	}
+}
+
+// --- run_shell error branches ----------------------------------------------
+
+func TestRunShellRejectsEmptyCmd(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgent(t, srv.URL, "dev1")
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{})
+	if !strings.Contains(resp, "cmd is required") {
+		t.Fatalf("expected cmd-required error, got: %s", resp)
+	}
+}
+
+func TestRunShellRejectsInvalidJSON(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgent(t, srv.URL, "dev1")
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": 123})
+	if !strings.Contains(resp, "cannot unmarshal") {
+		t.Fatalf("expected unmarshal error, got: %s", resp)
+	}
+}
+
+// --- custom fakeAgent helpers for result-branch coverage -------------------
+
+// fakeAgentWithResult is like fakeAgent but returns a fixed relay.Result
+// for every exec frame, allowing tests to cover truncated/stderr/exit-code
+// branches that fakeAgent's defaults can't reach.
+func fakeAgentWithResult(conn *websocket.Conn, res relay.Result) {
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var req map[string]any
+		if err := json.Unmarshal(raw, &req); err != nil {
+			continue
+		}
+		if req["type"] != "exec" {
+			continue
+		}
+		resp := map[string]any{
+			"type": "result", "reqId": req["reqId"], "code": res.Code,
+			"stdout": res.Stdout, "stderr": res.Stderr,
+			"truncated": res.Truncated, "durationMs": res.DurationMs,
+		}
+		b, _ := json.Marshal(resp)
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+	}
+}
+
+// beginAgentWithConfig is like beginAgent but uses a caller-supplied
+// relay.Result so the fake agent returns specific truncated/stderr/code values.
+func beginAgentWithConfig(t *testing.T, base, deviceID string, res relay.Result) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(base, "http") +
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=0.1.0&vc=1"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial agent: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	go fakeAgentWithResult(conn, res)
+	return conn
+}
+
+// --- run_shell result-branch tests ----------------------------------------
+
+// TestRunShellTimeoutClamp exercises the timeout > maxTimeout clamp in
+// runShellHandler: sending a timeoutMs that exceeds the 30s max must
+// silently cap to maxTimeout rather than erroring.
+func TestRunShellTimeoutClamp(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgent(t, srv.URL, "dev1")
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": "echo hi", "timeoutMs": 999999999})
+	if !strings.Contains(resp, "exit=0") {
+		t.Fatalf("expected successful response, got: %s", resp)
+	}
+}
+
+// TestRunShellTruncatedOutput covers the res.Truncated branch that appends
+// "[output truncated]" to the response body.
+func TestRunShellTruncatedOutput(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgentWithConfig(t, srv.URL, "dev1", relay.Result{Code: 0, Stdout: "partial output", Truncated: true, DurationMs: 5})
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": "echo hi"})
+	if !strings.Contains(resp, "output truncated") {
+		t.Fatalf("expected truncated marker, got: %s", resp)
+	}
+}
+
+// TestRunShellStderr covers the res.Stderr != "" branch that appends a
+// stderr section to the response body.
+func TestRunShellStderr(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgentWithConfig(t, srv.URL, "dev1", relay.Result{Code: 0, Stdout: "ok", Stderr: "warning: something", DurationMs: 5})
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": "echo hi"})
+	if !strings.Contains(resp, "warning: something") {
+		t.Fatalf("expected stderr in response, got: %s", resp)
+	}
+}
+
+// TestRunShellNonZeroExit covers the res.Code != 0 branch that sets
+// IsError: true on the CallResult.
+func TestRunShellNonZeroExit(t *testing.T) {
+	_, srv := newTestServer(t)
+	beginAgentWithConfig(t, srv.URL, "dev1", relay.Result{Code: 1, Stdout: "", Stderr: "command failed", DurationMs: 5})
+	waitForDevices(t, srv.URL, 1)
+	resp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": "false"})
+	if !strings.Contains(resp, "exit=1") {
+		t.Fatalf("expected exit=1, got: %s", resp)
+	}
+	if !strings.Contains(resp, "isError") {
+		t.Fatalf("expected isError in response, got: %s", resp)
+	}
 }

@@ -20,6 +20,7 @@ app/app/google-services.json
 # Go server build output
 server/relay
 server/publicserver
+server/setup
 
 # Secrets
 .env

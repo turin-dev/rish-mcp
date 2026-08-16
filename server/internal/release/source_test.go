@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -189,6 +192,30 @@ func TestRemoveStaleTmp(t *testing.T) {
 		// Must not panic or error.
 		s.removeStaleTmp()
 	})
+
+	t.Run("remove error other than not-exist is logged", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		dir := t.TempDir()
+		opts := SourceOptions{CacheDir: dir}
+		s := NewSource(opts)
+		// Make the tmp path a non-empty directory — os.Remove on a non-empty
+		// directory returns ENOTEMPTY even when running as root, which
+		// exercises the error branch.
+		tmpPath := filepath.Join(dir, "agent.apk.tmp")
+		if err := os.MkdirAll(filepath.Join(tmpPath, "subdir"), 0o755); err != nil {
+			t.Fatalf("mkdir tmp dir: %v", err)
+		}
+
+		s.removeStaleTmp()
+
+		if !strings.Contains(buf.String(), "failed to clean up stale tmp file") {
+			t.Fatalf("expected log about failed cleanup, got: %s", buf.String())
+		}
+	})
 }
 
 func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
@@ -258,4 +285,494 @@ func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
 			t.Fatal("expected tmp file to be cleaned up after failed rename")
 		}
 	})
+}
+
+// --- SourceOptionsFromEnv / envOr coverage ---------------------------------
+
+func TestSourceOptionsFromEnvDefaults(t *testing.T) {
+	opts := SourceOptionsFromEnv()
+	if opts.Repo != "turin-dev/rish-mcp" {
+		t.Errorf("Repo = %q, want turin-dev/rish-mcp", opts.Repo)
+	}
+	if opts.CacheDir != "/var/cache/rish-mcp" {
+		t.Errorf("CacheDir = %q, want /var/cache/rish-mcp", opts.CacheDir)
+	}
+	if opts.APIBase != "https://api.github.com" {
+		t.Errorf("APIBase = %q, want https://api.github.com", opts.APIBase)
+	}
+	if opts.PollEvery != 15*time.Minute {
+		t.Errorf("PollEvery = %v, want 15m", opts.PollEvery)
+	}
+	if opts.LocalAPK != "" {
+		t.Errorf("LocalAPK = %q, want empty", opts.LocalAPK)
+	}
+}
+
+func TestSourceOptionsFromEnvCustomValues(t *testing.T) {
+	t.Setenv("GITHUB_REPO", "my/custom-repo")
+	t.Setenv("RELEASE_CACHE_DIR", "/tmp/custom-cache")
+	t.Setenv("GITHUB_API_BASE", "https://my-gh-api.example.com")
+	t.Setenv("RELEASE_POLL_MS", "5000")
+	t.Setenv("APK_PATH", "/tmp/test.apk")
+
+	opts := SourceOptionsFromEnv()
+	if opts.Repo != "my/custom-repo" {
+		t.Errorf("Repo = %q", opts.Repo)
+	}
+	if opts.CacheDir != "/tmp/custom-cache" {
+		t.Errorf("CacheDir = %q", opts.CacheDir)
+	}
+	if opts.APIBase != "https://my-gh-api.example.com" {
+		t.Errorf("APIBase = %q", opts.APIBase)
+	}
+	if opts.PollEvery != 5*time.Second {
+		t.Errorf("PollEvery = %v, want 5s", opts.PollEvery)
+	}
+	if opts.LocalAPK != "/tmp/test.apk" {
+		t.Errorf("LocalAPK = %q", opts.LocalAPK)
+	}
+}
+
+func TestSourceOptionsFromEnvInvalidPollMs(t *testing.T) {
+	t.Setenv("RELEASE_POLL_MS", "not-a-number")
+	opts := SourceOptionsFromEnv()
+	if opts.PollEvery != 15*time.Minute {
+		t.Errorf("PollEvery = %v, want 15m (default after parse failure)", opts.PollEvery)
+	}
+}
+
+// --- Start coverage -------------------------------------------------------
+
+func TestStartLocalAPKMode(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+
+	dir := t.TempDir()
+	apkPath := filepath.Join(dir, "local.apk")
+	if err := os.WriteFile(apkPath, buildTestApkBytes(t, 42, "42.0.0"), 0o644); err != nil {
+		t.Fatalf("write apk: %v", err)
+	}
+
+	src := NewSource(SourceOptions{LocalAPK: apkPath})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src.Start(ctx)
+
+	rel := src.Get()
+	if rel == nil {
+		t.Fatal("expected local APK release, got nil")
+	}
+	if rel.Tag != "local" {
+		t.Errorf("Tag = %q, want local", rel.Tag)
+	}
+	if rel.VersionName != "42.0.0" {
+		t.Errorf("VersionName = %q, want 42.0.0", rel.VersionName)
+	}
+	if !strings.Contains(buf.String(), "serving local APK_PATH=") {
+		t.Fatalf("expected log about local APK, got: %s", buf.String())
+	}
+}
+
+func TestStartPollsAndStops(t *testing.T) {
+	apkBytes := buildTestApkBytes(t, 7, "7.0.0")
+
+	// Count requests so we can verify polling stops after cancel.
+	var (
+		mu         sync.Mutex
+		reqCount   int
+	)
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqCount++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v7.0.0",
+			"assets": []map[string]string{
+				{"name": "agent.apk", "browser_download_url": srv.URL + "/download/agent.apk"},
+			},
+		})
+	})
+	mux.HandleFunc("/download/agent.apk", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(apkBytes)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	src := NewSource(SourceOptions{
+		Repo:      "test/repo",
+		CacheDir:  t.TempDir(),
+		APIBase:   srv.URL,
+		PollEvery: 50 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src.Start(ctx)
+
+	// Wait for the initial refresh to complete.
+	var rel *Release
+	for i := 0; i < 20; i++ {
+		rel = src.Get()
+		if rel != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rel == nil {
+		t.Fatal("expected a release after Start, got nil")
+	}
+	if rel.Tag != "v7.0.0" {
+		t.Errorf("Tag = %q, want v7.0.0", rel.Tag)
+	}
+	if rel.VersionName != "7.0.0" {
+		t.Errorf("VersionName = %q, want 7.0.0", rel.VersionName)
+	}
+
+	// Record count before the ticker-driven poll window.
+	mu.Lock()
+	before := reqCount
+	mu.Unlock()
+
+	// Stay alive past at least one poll tick so the select loop's ticker.C
+	// branch actually runs (PollEvery=50ms; 120ms covers two ticks even under
+	// scheduler jitter). The tick's refresh() finds the same tag and no-ops,
+	// but the request counter still increments.
+	time.Sleep(120 * time.Millisecond)
+
+	mu.Lock()
+	after := reqCount
+	mu.Unlock()
+	if after <= before {
+		t.Fatal("ticker.C branch did not fire: no requests after initial refresh")
+	}
+
+	cancel()
+	// After cancel, wait a full tick window and verify no new requests arrive.
+	time.Sleep(150 * time.Millisecond)
+
+	mu.Lock()
+	postCancel := reqCount
+	mu.Unlock()
+	if postCancel != after {
+		t.Fatalf("polling did not stop after cancel: %d -> %d requests", after, postCancel)
+	}
+}
+
+// --- Get edge cases -------------------------------------------------------
+
+func TestGetLocalAPKFailure(t *testing.T) {
+	src := NewSource(SourceOptions{LocalAPK: "/nonexistent/path.apk"})
+	rel := src.Get()
+	if rel != nil {
+		t.Fatalf("expected nil for missing LocalAPK, got %+v", rel)
+	}
+}
+
+// --- loadCache edge cases -------------------------------------------------
+
+func TestLoadCacheVariants(t *testing.T) {
+	t.Run("missing meta file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		apkPath := filepath.Join(dir, "agent.apk")
+		if err := os.WriteFile(apkPath, buildTestApkBytes(t, 1, "1.0.0"), 0o644); err != nil {
+			t.Fatalf("write apk: %v", err)
+		}
+		src := NewSource(SourceOptions{CacheDir: dir})
+		src.loadCache()
+		if rel := src.Get(); rel != nil {
+			t.Fatal("expected nil when meta file is missing")
+		}
+	})
+
+	t.Run("corrupt meta JSON is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		apkPath := filepath.Join(dir, "agent.apk")
+		if err := os.WriteFile(apkPath, buildTestApkBytes(t, 1, "1.0.0"), 0o644); err != nil {
+			t.Fatalf("write apk: %v", err)
+		}
+		metaPath := filepath.Join(dir, "release.json")
+		if err := os.WriteFile(metaPath, []byte("not json"), 0o644); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+		src := NewSource(SourceOptions{CacheDir: dir})
+		src.loadCache()
+		if rel := src.Get(); rel != nil {
+			t.Fatal("expected nil when meta is corrupt")
+		}
+	})
+
+	t.Run("valid meta but unusable APK logs warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		dir := t.TempDir()
+		apkPath := filepath.Join(dir, "agent.apk")
+		if err := os.WriteFile(apkPath, []byte("not an apk"), 0o644); err != nil {
+			t.Fatalf("write apk: %v", err)
+		}
+		metaPath := filepath.Join(dir, "release.json")
+		metaBytes, _ := json.Marshal(map[string]string{"tag": "v1.0.0"})
+		if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+
+		src := NewSource(SourceOptions{CacheDir: dir})
+		src.loadCache()
+		if rel := src.Get(); rel != nil {
+			t.Fatal("expected nil when APK is unusable")
+		}
+		if !strings.Contains(buf.String(), "ignoring unusable cache") {
+			t.Fatalf("expected log about unusable cache, got: %s", buf.String())
+		}
+	})
+
+	t.Run("tag empty defaults to unknown", func(t *testing.T) {
+		dir := t.TempDir()
+		apkPath := filepath.Join(dir, "agent.apk")
+		if err := os.WriteFile(apkPath, buildTestApkBytes(t, 2, "2.0.0"), 0o644); err != nil {
+			t.Fatalf("write apk: %v", err)
+		}
+		metaPath := filepath.Join(dir, "release.json")
+		metaBytes, _ := json.Marshal(map[string]string{"tag": ""})
+		if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+
+		src := NewSource(SourceOptions{CacheDir: dir})
+		src.loadCache()
+		rel := src.Get()
+		if rel == nil {
+			t.Fatal("expected a release, got nil")
+		}
+		if rel.Tag != "unknown" {
+			t.Errorf("Tag = %q, want unknown", rel.Tag)
+		}
+	})
+}
+
+// --- refresh failure paths ------------------------------------------------
+
+func TestRefreshFailurePaths(t *testing.T) {
+	t.Run("empty tag_name", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "",
+				"assets": []map[string]string{
+					{"name": "agent.apk", "browser_download_url": "http://example.com/agent.apk"},
+				},
+			})
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{Repo: "test/repo", CacheDir: t.TempDir(), APIBase: srv.URL, PollEvery: time.Hour})
+		src.refresh(context.Background())
+		if !strings.Contains(buf.String(), "release has no tag_name") {
+			t.Fatalf("expected 'no tag_name' log, got: %s", buf.String())
+		}
+	})
+
+	t.Run("no apk asset", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "v1.0.0",
+				"assets": []map[string]string{
+					{"name": "agent.exe", "browser_download_url": "http://example.com/agent.exe"},
+				},
+			})
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{Repo: "test/repo", CacheDir: t.TempDir(), APIBase: srv.URL, PollEvery: time.Hour})
+		src.refresh(context.Background())
+		if !strings.Contains(buf.String(), "no .apk asset") {
+			t.Fatalf("expected 'no .apk asset' log, got: %s", buf.String())
+		}
+	})
+
+	t.Run("http error from API", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{Repo: "test/repo", CacheDir: t.TempDir(), APIBase: srv.URL, PollEvery: time.Hour})
+		src.refresh(context.Background())
+		if !strings.Contains(buf.String(), "refresh failed") {
+			t.Fatalf("expected 'refresh failed' log, got: %s", buf.String())
+		}
+	})
+
+	t.Run("json decode error", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(old) })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("not json"))
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{Repo: "test/repo", CacheDir: t.TempDir(), APIBase: srv.URL, PollEvery: time.Hour})
+		src.refresh(context.Background())
+		if !strings.Contains(buf.String(), "refresh failed") {
+			t.Fatalf("expected 'refresh failed' log, got: %s", buf.String())
+		}
+	})
+}
+
+// --- fetchJSON error paths -------------------------------------------------
+
+func TestFetchJSONErrors(t *testing.T) {
+	src := NewSource(SourceOptions{})
+
+	t.Run("bad url", func(t *testing.T) {
+		_, err := src.fetchJSON(context.Background(), "://bad", time.Second)
+		if err == nil {
+			t.Fatal("expected error for malformed URL")
+		}
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		_, err := src.fetchJSON(context.Background(), "http://127.0.0.1:1/repos/test/repo/releases/latest", time.Second)
+		if err == nil {
+			t.Fatal("expected error when connection is refused")
+		}
+	})
+}
+
+// --- downloadAndPublish error paths -----------------------------------------
+
+func TestDownloadAndPublishErrors(t *testing.T) {
+	t.Run("bad url", func(t *testing.T) {
+		src := NewSource(SourceOptions{})
+		if err := src.downloadAndPublish(context.Background(), "://bad", "v1.0.0"); err == nil {
+			t.Fatal("expected error for malformed URL")
+		}
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		src := NewSource(SourceOptions{})
+		if err := src.downloadAndPublish(context.Background(), "http://127.0.0.1:1/agent.apk", "v1.0.0"); err == nil {
+			t.Fatal("expected error when connection is refused")
+		}
+	})
+
+	t.Run("non-200 status", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{})
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "v1.0.0")
+		if err == nil {
+			t.Fatal("expected error for non-200 download")
+		}
+		if !strings.Contains(err.Error(), "download -> 404") {
+			t.Fatalf("expected 'download -> 404' in error, got: %v", err)
+		}
+	})
+
+	t.Run("truncated body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "1000")
+			_, _ = w.Write([]byte("short body"))
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{})
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "v1.0.0")
+		if err == nil {
+			t.Fatal("expected error when body is truncated")
+		}
+	})
+
+	t.Run("cache dir is a file", func(t *testing.T) {
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(buildTestApkBytes(t, 3, "1.0.0"))
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{CacheDir: blocker})
+		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "v1.0.0"); err == nil {
+			t.Fatal("expected error when the cache dir cannot be created")
+		}
+	})
+
+	t.Run("tmp path is a directory", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cacheDir, "agent.apk.tmp"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(buildTestApkBytes(t, 3, "1.0.0"))
+		}))
+		defer srv.Close()
+
+		src := NewSource(SourceOptions{CacheDir: cacheDir})
+		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "v1.0.0"); err == nil {
+			t.Fatal("expected error when the tmp path is an existing directory")
+		}
+	})
+}
+
+func TestDownloadAndPublishVersionMismatch(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+
+	apkBytes := buildTestApkBytes(t, 3, "1.0.0")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(apkBytes)
+	}))
+	defer srv.Close()
+
+	src := NewSource(SourceOptions{CacheDir: t.TempDir()})
+	if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "v2.0.0"); err != nil {
+		t.Fatalf("downloadAndPublish: %v", err)
+	}
+	if !strings.Contains(buf.String(), "does not match APK versionName") {
+		t.Fatalf("expected version-mismatch log, got: %s", buf.String())
+	}
+	rel := src.Get()
+	if rel == nil {
+		t.Fatal("expected a release after download")
+	}
+	if rel.Tag != "v2.0.0" {
+		t.Errorf("Tag = %q, want v2.0.0", rel.Tag)
+	}
+	if rel.VersionName != "1.0.0" {
+		t.Errorf("VersionName = %q, want 1.0.0", rel.VersionName)
+	}
 }

@@ -262,7 +262,7 @@ func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string) e
 	_ = os.WriteFile(s.metaFile(), metaBytes, 0o644)
 
 	fresh, err := ReadApkInfo(s.apkFile())
-	if err != nil {
+	if err != nil { // unreachable: Rename on the same fs preserves size+mtime, so the cache always hits
 		return err
 	}
 	s.mu.Lock()
