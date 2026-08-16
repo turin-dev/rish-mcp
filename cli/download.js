@@ -1,8 +1,26 @@
 import { createWriteStream, existsSync, rmSync, renameSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
+import { Transform, Readable } from "node:stream";
 
 export const DOWNLOAD_TIMEOUT_MS = 120_000;
+export const DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
+// limitBytes returns a Transform that errors if more than maxBytes flow
+// through it. This prevents a malicious or misconfigured server from filling
+// the disk with an unbounded download.
+function limitBytes(maxBytes) {
+  let total = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        callback(new Error(`download exceeded ${maxBytes} bytes`));
+      } else {
+        callback(null, chunk);
+      }
+    },
+  });
+}
 
 function replaceDownloadedFile(temp, dest) {
   try {
@@ -26,7 +44,7 @@ function replaceDownloadedFile(temp, dest) {
   rmSync(backup, { force: true });
 }
 
-export async function downloadFile(url, dest, { timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
+export async function downloadFile(url, dest, { timeoutMs = DOWNLOAD_TIMEOUT_MS, maxBytes = DOWNLOAD_MAX_BYTES } = {}) {
   const temp = `${dest}.part-${process.pid}-${Date.now()}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -34,7 +52,11 @@ export async function downloadFile(url, dest, { timeoutMs = DOWNLOAD_TIMEOUT_MS 
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     if (!res.body) throw new Error("response has no body");
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(temp));
+    await pipeline(
+      Readable.fromWeb(res.body),
+      limitBytes(maxBytes),
+      createWriteStream(temp),
+    );
     replaceDownloadedFile(temp, dest);
   } catch (error) {
     const detail = error?.name === "AbortError"

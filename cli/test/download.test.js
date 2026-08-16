@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { downloadFile } from "../download.js";
@@ -51,6 +51,25 @@ test("downloadFile removes partial output and preserves an existing cache on fai
     );
     assert.equal(readFileSync(dest, "utf8"), "old-cache");
     assert.equal(existsSync(`${dest}.part-${process.pid}`), false);
+  } finally {
+    server.close();
+  }
+});
+
+test("downloadFile rejects responses larger than maxBytes", async () => {
+  const dir = tempPath();
+  const dest = path.join(dir, "agent.apk");
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    res.end("0123456789");
+  });
+  try {
+    await assert.rejects(
+      downloadFile(`http://127.0.0.1:${server.address().port}/agent.apk`, dest, { maxBytes: 5 }),
+      /download failed: download exceeded 5 bytes/
+    );
+    assert.equal(existsSync(dest), false);
+    assert.equal(readdirSync(dir).some((f) => f.endsWith(".part-")), false);
   } finally {
     server.close();
   }
