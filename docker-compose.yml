@@ -8,6 +8,9 @@ services:
       target: relay
     image: rishmcp-relay:latest
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid,nodev
     environment:
       PORT: "8080"
       PUBLIC_URL: "https://${MCP_HOST}"
@@ -31,6 +34,9 @@ services:
       target: publicserver
     image: rishmcp-public:latest
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid,nodev
     environment:
       PORT: "8080"
       GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
