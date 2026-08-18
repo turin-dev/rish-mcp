@@ -5,15 +5,144 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+const (
+	fakeADBDevicesEnv      = "RISH_MCP_TEST_ADB_DEVICES"
+	fakeDockerBuildExitEnv = "RISH_MCP_TEST_DOCKER_BUILD_EXIT"
+	fakeDockerRunExitEnv   = "RISH_MCP_TEST_DOCKER_RUN_EXIT"
+	fakeDockerTouchAPKEnv  = "RISH_MCP_TEST_DOCKER_TOUCH_APK"
+)
+
+// TestMain doubles the current test binary as cross-platform adb and docker
+// shims. Tests install a hard link (or copy) named adb(.exe) / docker(.exe) on
+// PATH, so production code still exercises exec.LookPath and exec.Command
+// without relying on /bin/sh or Windows batch-file execution semantics.
+func TestMain(m *testing.M) {
+	command := strings.TrimSuffix(strings.ToLower(filepath.Base(os.Args[0])), ".exe")
+	switch command {
+	case "adb", "docker":
+		os.Exit(runFakeCommand(command, os.Args[1:]))
+	default:
+		os.Exit(m.Run())
+	}
+}
+
+func runFakeCommand(command string, args []string) int {
+	switch command {
+	case "adb":
+		if len(args) == 0 {
+			return 0
+		}
+		switch args[0] {
+		case "devices":
+			fmt.Println("List of devices attached")
+			if devices := os.Getenv(fakeADBDevicesEnv); devices != "" {
+				for _, device := range strings.Split(devices, "\x1f") {
+					fmt.Println(device)
+				}
+			}
+		case "install":
+			fmt.Println("Success")
+		}
+		return 0
+	case "docker":
+		if len(args) == 0 {
+			return 0
+		}
+		exitEnv := fakeDockerRunExitEnv
+		if args[0] == "build" {
+			exitEnv = fakeDockerBuildExitEnv
+		}
+		if args[0] == "run" && os.Getenv(fakeDockerTouchAPKEnv) == "1" {
+			apk := filepath.Join("app", "app", "build", "outputs", "apk", "debug", "app-debug.apk")
+			if err := os.MkdirAll(filepath.Dir(apk), 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
+			if err := os.WriteFile(apk, nil, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
+		}
+		exitCode, err := strconv.Atoi(os.Getenv(exitEnv))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		return exitCode
+	}
+	return 2
+}
+
+func fakeExecutableName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func installFakeCommand(t *testing.T, dir, name string) string {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test executable: %v", err)
+	}
+	dest := filepath.Join(dir, fakeExecutableName(name))
+	// A hard link to the currently running test binary cannot be removed on
+	// Windows until the parent process exits, which breaks t.TempDir cleanup.
+	if runtime.GOOS != "windows" {
+		if err := os.Link(source, dest); err == nil {
+			return dest
+		}
+	}
+
+	in, err := os.Open(source)
+	if err != nil {
+		t.Fatalf("open test executable: %v", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	if err != nil {
+		t.Fatalf("create fake %s: %v", name, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		t.Fatalf("copy fake %s: %v", name, err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("close fake %s: %v", name, err)
+	}
+	return dest
+}
+
+func prependPath(dir, path string) string {
+	if path == "" {
+		return dir
+	}
+	return dir + string(os.PathListSeparator) + path
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	// os.UserHomeDir uses USERPROFILE on Windows and HOME on Unix.
+	t.Setenv("USERPROFILE", home)
+}
+
+func platformToolsADBArchivePath() string {
+	return filepath.ToSlash(adbBinaryName())
+}
 
 // --- randomToken ---
 
@@ -39,6 +168,18 @@ func TestColorsEnabledNoColorEnv(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	if colorsEnabled() {
 		t.Fatal("expected colorsEnabled=false with NO_COLOR=1")
+	}
+}
+
+func TestConfiguredServerURLFailsClosed(t *testing.T) {
+	t.Setenv("RISH_MCP_SERVER", "")
+	if got := configuredServerURL(); got != "" {
+		t.Fatalf("configuredServerURL() = %q, want empty local-build default", got)
+	}
+
+	t.Setenv("RISH_MCP_SERVER", "https://trusted.example")
+	if got := configuredServerURL(); got != "https://trusted.example" {
+		t.Fatalf("configuredServerURL() = %q, want explicit environment value", got)
 	}
 }
 
@@ -135,6 +276,8 @@ func TestPlatformToolsURL(t *testing.T) {
 // --- platformToolsCacheDir ---
 
 func TestPlatformToolsCacheDir(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
 	dir, err := platformToolsCacheDir()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -146,7 +289,9 @@ func TestPlatformToolsCacheDir(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("expected dir to exist: %v", err)
 	}
-	_ = os.RemoveAll(dir) // cleanup
+	if want := filepath.Join(home, ".rish-mcp"); dir != want {
+		t.Fatalf("expected isolated cache dir %q, got %q", want, dir)
+	}
 }
 
 // --- step ---
@@ -333,7 +478,9 @@ func TestFindRepoRoot(t *testing.T) {
 
 func TestFindRepoRootOutside(t *testing.T) {
 	origWd, _ := os.Getwd()
-	_ = os.Chdir("/tmp")
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
 	defer os.Chdir(origWd)
 	if _, err := findRepoRoot(); err == nil {
 		t.Fatal("expected error outside repo")
@@ -532,12 +679,9 @@ func TestExtractZipFileBadMode(t *testing.T) {
 // --- listDevices ---
 
 func TestListDevicesEmpty(t *testing.T) {
-	dir := t.TempDir()
-	adbScript := filepath.Join(dir, "adb")
-	if err := os.WriteFile(adbScript, []byte("#!/bin/sh\necho 'List of devices attached'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	devices, err := listDevices(adbScript)
+	adbPath, restore := fakeADBCommand(t)
+	defer restore()
+	devices, err := listDevices(adbPath)
 	if err != nil {
 		t.Fatalf("listDevices failed: %v", err)
 	}
@@ -547,12 +691,9 @@ func TestListDevicesEmpty(t *testing.T) {
 }
 
 func TestListDevicesOneDevice(t *testing.T) {
-	dir := t.TempDir()
-	adbScript := filepath.Join(dir, "adb")
-	if err := os.WriteFile(adbScript, []byte("#!/bin/sh\necho 'List of devices attached\nemulator-5554\tdevice'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	devices, err := listDevices(adbScript)
+	adbPath, restore := fakeADBCommand(t, "emulator-5554\tdevice")
+	defer restore()
+	devices, err := listDevices(adbPath)
 	if err != nil {
 		t.Fatalf("listDevices failed: %v", err)
 	}
@@ -565,12 +706,12 @@ func TestListDevicesOneDevice(t *testing.T) {
 }
 
 func TestListDevicesFiltersOffline(t *testing.T) {
-	dir := t.TempDir()
-	adbScript := filepath.Join(dir, "adb")
-	if err := os.WriteFile(adbScript, []byte("#!/bin/sh\necho 'List of devices attached\nemulator-5554\tdevice\n192.168.1.10:5555\toffline'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	devices, err := listDevices(adbScript)
+	adbPath, restore := fakeADBCommand(t,
+		"emulator-5554\tdevice",
+		"192.168.1.10:5555\toffline",
+	)
+	defer restore()
+	devices, err := listDevices(adbPath)
 	if err != nil {
 		t.Fatalf("listDevices failed: %v", err)
 	}
@@ -592,14 +733,8 @@ func TestListDevicesNoAdb(t *testing.T) {
 // --- ensureADB ---
 
 func TestEnsureADBFoundOnPath(t *testing.T) {
-	dir := t.TempDir()
-	adbPath := filepath.Join(dir, "adb")
-	if err := os.WriteFile(adbPath, []byte("#!/bin/sh\necho 'fake adb'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	origPath := os.Getenv("PATH")
-	defer os.Setenv("PATH", origPath)
-	os.Setenv("PATH", dir+":"+origPath)
+	adbPath, restore := fakeADBCommand(t)
+	defer restore()
 
 	p, err := ensureADB()
 	if err != nil {
@@ -613,12 +748,12 @@ func TestEnsureADBFoundOnPath(t *testing.T) {
 func TestEnsureADBUsesCached(t *testing.T) {
 	// Redirect HOME to a temp dir so platformToolsCacheDir points there.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cachedDir := filepath.Join(home, ".rish-mcp", "platform-tools")
+	setTestHome(t, home)
+	cachedAdb := filepath.Join(home, ".rish-mcp", adbBinaryName())
+	cachedDir := filepath.Dir(cachedAdb)
 	if err := os.MkdirAll(cachedDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cachedAdb := filepath.Join(cachedDir, "adb")
 	if err := os.WriteFile(cachedAdb, []byte("fake cached adb"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +782,7 @@ func TestEnsureADBInteractiveRejects(t *testing.T) {
 	defer cleanup()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	origPath := os.Getenv("PATH")
 	defer os.Setenv("PATH", origPath)
 	os.Setenv("PATH", "")
@@ -671,14 +806,14 @@ func TestEnsureADBDownloads(t *testing.T) {
 	defer func() { nonInteractive = false }()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	origPath := os.Getenv("PATH")
 	defer os.Setenv("PATH", origPath)
 	os.Setenv("PATH", "")
 
-	// Serve a valid zip with platform-tools/adb.
+	// Serve a valid zip with the current platform's adb binary name.
 	zipPath := filepath.Join(t.TempDir(), "ptools.zip")
-	writeZip(t, zipPath, map[string]string{"platform-tools/adb": "fake-adb"})
+	writeZip(t, zipPath, map[string]string{platformToolsADBArchivePath(): "fake-adb"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, zipPath)
 	}))
@@ -859,23 +994,25 @@ func fakeRepoTree(t *testing.T) string {
 func fakeDocker(t *testing.T, runExit, buildExit int, touchApk bool) (*os.File, func()) {
 	t.Helper()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n"
-	if touchApk {
-		script += "if [ \"$1\" = run ]; then\n"
-		script += "  mkdir -p app/app/build/outputs/apk/debug\n"
-		script += "  : > app/app/build/outputs/apk/debug/app-debug.apk\n"
-		script += "fi\n"
-	}
-	script += fmt.Sprintf("if [ \"$1\" = build ]; then exit %d; fi\n", buildExit)
-	script += fmt.Sprintf("if [ \"$1\" = run ]; then exit %d; fi\n", runExit)
-	script += "exit 0\n"
-	dockerPath := filepath.Join(bin, "docker")
-	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installFakeCommand(t, bin, "docker")
 	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", bin+":"+origPath)
-	return nil, func() { os.Setenv("PATH", origPath) }
+	origBuildExit := os.Getenv(fakeDockerBuildExitEnv)
+	origRunExit := os.Getenv(fakeDockerRunExitEnv)
+	origTouchAPK := os.Getenv(fakeDockerTouchAPKEnv)
+	os.Setenv("PATH", prependPath(bin, origPath))
+	os.Setenv(fakeDockerBuildExitEnv, strconv.Itoa(buildExit))
+	os.Setenv(fakeDockerRunExitEnv, strconv.Itoa(runExit))
+	if touchApk {
+		os.Setenv(fakeDockerTouchAPKEnv, "1")
+	} else {
+		os.Setenv(fakeDockerTouchAPKEnv, "0")
+	}
+	return nil, func() {
+		os.Setenv("PATH", origPath)
+		os.Setenv(fakeDockerBuildExitEnv, origBuildExit)
+		os.Setenv(fakeDockerRunExitEnv, origRunExit)
+		os.Setenv(fakeDockerTouchAPKEnv, origTouchAPK)
+	}
 }
 
 func TestBuildLocallyDockerBuildFails(t *testing.T) {
@@ -1008,32 +1145,26 @@ func TestBuildLocallyEmptyOutputDir(t *testing.T) {
 // and `adb shell`. Returns a restore func for PATH.
 func fakeAdb(t *testing.T, deviceIDs ...string) func() {
 	t.Helper()
-	bin := t.TempDir()
-	var sb strings.Builder
-	sb.WriteString("#!/bin/sh\n")
-	sb.WriteString("case \"$1\" in\n")
-	sb.WriteString("  devices)\n")
-	sb.WriteString("    echo 'List of devices attached'\n")
+	deviceLines := make([]string, 0, len(deviceIDs))
 	for _, id := range deviceIDs {
-		sb.WriteString(fmt.Sprintf("    echo \"%s\\tdevice\"\n", id))
+		deviceLines = append(deviceLines, id+"\tdevice")
 	}
-	sb.WriteString("    ;;\n")
-	sb.WriteString("  install)\n")
-	sb.WriteString("    echo 'Success'\n")
-	sb.WriteString("    ;;\n")
-	sb.WriteString("  tcpip)\n")
-	sb.WriteString("    ;;\n")
-	sb.WriteString("  shell)\n")
-	sb.WriteString("    ;;\n")
-	sb.WriteString("esac\n")
-	sb.WriteString("exit 0\n")
-	adbPath := filepath.Join(bin, "adb")
-	if err := os.WriteFile(adbPath, []byte(sb.String()), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	_, restore := fakeADBCommand(t, deviceLines...)
+	return restore
+}
+
+func fakeADBCommand(t *testing.T, deviceLines ...string) (string, func()) {
+	t.Helper()
+	bin := t.TempDir()
+	adbPath := installFakeCommand(t, bin, "adb")
 	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", bin+":"+origPath)
-	return func() { os.Setenv("PATH", origPath) }
+	origDevices := os.Getenv(fakeADBDevicesEnv)
+	os.Setenv("PATH", prependPath(bin, origPath))
+	os.Setenv(fakeADBDevicesEnv, strings.Join(deviceLines, "\x1f"))
+	return adbPath, func() {
+		os.Setenv("PATH", origPath)
+		os.Setenv(fakeADBDevicesEnv, origDevices)
+	}
 }
 
 // --- runBuildAPKOnly ---
@@ -1044,7 +1175,7 @@ func TestRunBuildAPKOnlyServerDownload(t *testing.T) {
 	defer func() { nonInteractive = false }()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "fake APK content")
@@ -1068,7 +1199,7 @@ func TestRunBuildAPKOnlyDownloadFails(t *testing.T) {
 	defer func() { nonInteractive = false }()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	err := runBuildAPKOnly("http://127.0.0.1:1")
 	if err == nil {
@@ -1117,7 +1248,7 @@ func TestRunDeviceSetupHappyPath(t *testing.T) {
 	defer fakeAdb(t, "emulator-5554")()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	// Serve the APK.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1146,7 +1277,7 @@ func TestRunDeviceSetupNoDevice(t *testing.T) {
 	defer fakeAdb(t)()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "fake APK content")
@@ -1173,7 +1304,7 @@ func TestRunDeviceSetupFailFastNoDocker(t *testing.T) {
 	defer restoreAdb()
 
 	// Keep only the fake adb bin dir in PATH so docker is not found.
-	pathDirs := strings.Split(os.Getenv("PATH"), ":")
+	pathDirs := filepath.SplitList(os.Getenv("PATH"))
 	os.Setenv("PATH", pathDirs[0])
 
 	err := runDeviceSetup("")
@@ -1200,7 +1331,7 @@ func TestRunDeviceSetupPreAndroid11Interactive(t *testing.T) {
 	defer fakeAdb(t, "emulator-5554")()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "fake APK content")
@@ -1295,7 +1426,7 @@ func TestAcquireAPKServerDownloadFails(t *testing.T) {
 
 func TestDownloadPlatformToolsSuccess(t *testing.T) {
 	zipPath := filepath.Join(t.TempDir(), "ptools.zip")
-	writeZip(t, zipPath, map[string]string{"platform-tools/adb": "fake-adb-binary"})
+	writeZip(t, zipPath, map[string]string{platformToolsADBArchivePath(): "fake-adb-binary"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, zipPath)
 	}))

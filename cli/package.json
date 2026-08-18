@@ -1,6 +1,6 @@
 {
   "name": "rish-mcp-setup",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Interactive installer for the rish-mcp Android agent -- adb, pairing, APK, install.",
   "keywords": [
     "rish-mcp",

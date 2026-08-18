@@ -127,12 +127,16 @@ func promptYesNo(label string, def bool) bool {
 
 // --- main flow ---
 
+func configuredServerURL() string {
+	return os.Getenv("RISH_MCP_SERVER")
+}
+
 func main() {
-	defaultServer := "https://rish-mcp.turin.my"
-	if v := os.Getenv("RISH_MCP_SERVER"); v != "" {
-		defaultServer = v
-	}
-	serverURL := flag.String("server", defaultServer, "base URL of the official rish-mcp version server (pass an empty string to force a local build instead)")
+	// Legacy GitHub releases contain the Shizuku implementation. Fail closed
+	// and build the rewrite locally unless the operator explicitly configures
+	// a compatible version server.
+	defaultServer := configuredServerURL()
+	serverURL := flag.String("server", defaultServer, "base URL of an explicitly trusted rish-mcp version server (unset builds locally)")
 	yes := flag.Bool("yes", false, "non-interactive: take every prompt's default, run one -action and exit (for agents/scripts)")
 	flag.BoolVar(yes, "y", false, "shorthand for -yes")
 	action := flag.String("action", "setup", "which menu entry to run in -yes mode: setup, apk, or relay")

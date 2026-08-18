@@ -4,10 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -249,6 +252,45 @@ func TestReadApkInfoCachesOnUnchangedFile(t *testing.T) {
 	}
 }
 
+func TestReadApkInfoCacheSeparatesImmutablePaths(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "one.apk"), filepath.Join(dir, "two.apk")}
+	for i, path := range paths {
+		if err := os.WriteFile(path, buildTestApkBytes(t, i+1, fmt.Sprintf("%d.0.0", i+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixedTime := time.Unix(1_700_000_000, 0)
+	for _, path := range paths {
+		if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstStat, err := os.Stat(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondStat, err := os.Stat(paths[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstStat.Size() != secondStat.Size() || !firstStat.ModTime().Equal(secondStat.ModTime()) {
+		t.Fatalf("test requires identical size+mtime: first=%v second=%v", firstStat, secondStat)
+	}
+
+	first, err := ReadApkInfo(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ReadApkInfo(paths[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.VersionName != "1.0.0" || second.VersionName != "2.0.0" || first.SHA256 == second.SHA256 {
+		t.Fatalf("distinct immutable paths aliased in info cache: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestReadApkInfoRejectsNonZip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "not-an-apk.apk")
@@ -275,6 +317,43 @@ func TestReadApkInfoRejectsMissingManifest(t *testing.T) {
 
 	if _, err := ReadApkInfo(path); err == nil {
 		t.Fatal("expected an error when AndroidManifest.xml is missing, got nil")
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+func TestReadApkInfoRejectsOversizedInflatedManifest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest-zip-bomb.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("AndroidManifest.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(w, zeroReader{}, maxAndroidManifestBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ReadApkInfo(path)
+	if err == nil || !strings.Contains(err.Error(), "AndroidManifest.xml exceeds") {
+		t.Fatalf("expected inflated-manifest size rejection, got %v", err)
 	}
 }
 
@@ -389,14 +468,14 @@ func TestParseStringPoolErrors(t *testing.T) {
 
 	t.Run("truncated offset table", func(t *testing.T) {
 		var buf bytes.Buffer
-		buf.Write(u16le(0x0001))     // chunk type
-		buf.Write(u16le(0x001c))     // header size
-		buf.Write(u32le(0))          // chunk size (placeholder)
-		buf.Write(u32le(5))          // stringCount = 5
-		buf.Write(u32le(0))          // styleCount
-		buf.Write(u32le(0))          // flags
-		buf.Write(u32le(0))          // stringsStart
-		buf.Write(u32le(0))          // stylesStart
+		buf.Write(u16le(0x0001))            // chunk type
+		buf.Write(u16le(0x001c))            // header size
+		buf.Write(u32le(0))                 // chunk size (placeholder)
+		buf.Write(u32le(5))                 // stringCount = 5
+		buf.Write(u32le(0))                 // styleCount
+		buf.Write(u32le(0))                 // flags
+		buf.Write(u32le(0))                 // stringsStart
+		buf.Write(u32le(0))                 // stylesStart
 		buf.Write([]byte{0x01, 0x02, 0x03}) // only 3 bytes for 5 offsets
 		_, err := parseStringPool(buf.Bytes(), 0)
 		if err == nil || !strings.Contains(err.Error(), "truncated string pool offset table") {
@@ -404,17 +483,26 @@ func TestParseStringPoolErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("huge declared count is rejected before allocation", func(t *testing.T) {
+		buf := make([]byte, 28)
+		binary.LittleEndian.PutUint32(buf[8:12], ^uint32(0))
+		_, err := parseStringPool(buf, 0)
+		if err == nil || !strings.Contains(err.Error(), "truncated string pool offset table") {
+			t.Fatalf("expected impossible string count rejection, got %v", err)
+		}
+	})
+
 	t.Run("entry out of range", func(t *testing.T) {
 		var buf bytes.Buffer
-		buf.Write(u16le(0x0001))     // chunk type
-		buf.Write(u16le(0x001c))     // header size
-		buf.Write(u32le(0))          // chunk size
-		buf.Write(u32le(1))          // stringCount = 1
-		buf.Write(u32le(0))          // styleCount
-		buf.Write(u32le(0))          // flags
-		buf.Write(u32le(100))        // stringsStart = 100 (beyond buffer)
-		buf.Write(u32le(0))          // stylesStart
-		buf.Write(u32le(0))          // offset = 0 → entry at start+100
+		buf.Write(u16le(0x0001)) // chunk type
+		buf.Write(u16le(0x001c)) // header size
+		buf.Write(u32le(0))      // chunk size
+		buf.Write(u32le(1))      // stringCount = 1
+		buf.Write(u32le(0))      // styleCount
+		buf.Write(u32le(0))      // flags
+		buf.Write(u32le(100))    // stringsStart = 100 (beyond buffer)
+		buf.Write(u32le(0))      // stylesStart
+		buf.Write(u32le(0))      // offset = 0 → entry at start+100
 		_, err := parseStringPool(buf.Bytes(), 0)
 		if err == nil || !strings.Contains(err.Error(), "out of range") {
 			t.Fatalf("expected out of range error, got %v", err)
@@ -493,6 +581,26 @@ func TestReadApkInfoFileNotFound(t *testing.T) {
 	_, err := ReadApkInfo("/nonexistent/path.apk")
 	if err == nil {
 		t.Fatal("expected error for non-existent file, got nil")
+	}
+}
+
+func TestReadApkInfoRejectsOversizedFileBeforeRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxAPKDownloadBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ReadApkInfo(path)
+	if err == nil || !strings.Contains(err.Error(), "APK is too large") {
+		t.Fatalf("expected pre-read APK size rejection, got %v", err)
 	}
 }
 
@@ -575,16 +683,16 @@ func TestParseManifestStringPoolError(t *testing.T) {
 	entryData.WriteByte('a')  // only 1 byte provided
 
 	var pool bytes.Buffer
-	pool.Write(u16le(0x0001))                     // chunk type
-	pool.Write(u16le(0x001c))                     // header size
+	pool.Write(u16le(0x0001)) // chunk type
+	pool.Write(u16le(0x001c)) // header size
 	chunkSize := uint32(8 + 20 + 4 + entryData.Len())
-	pool.Write(u32le(chunkSize))                  // chunk size
-	pool.Write(u32le(1))                          // stringCount = 1
-	pool.Write(u32le(0))                          // styleCount
-	pool.Write(u32le(1 << 8))                     // flags: UTF8_FLAG
-	pool.Write(u32le(uint32(8 + 20 + 4)))          // stringsStart
-	pool.Write(u32le(0))                          // stylesStart
-	pool.Write(u32le(0))                          // offset 0
+	pool.Write(u32le(chunkSize))          // chunk size
+	pool.Write(u32le(1))                  // stringCount = 1
+	pool.Write(u32le(0))                  // styleCount
+	pool.Write(u32le(1 << 8))             // flags: UTF8_FLAG
+	pool.Write(u32le(uint32(8 + 20 + 4))) // stringsStart
+	pool.Write(u32le(0))                  // stylesStart
+	pool.Write(u32le(0))                  // offset 0
 	pool.Write(entryData.Bytes())
 
 	var axml bytes.Buffer
@@ -611,24 +719,24 @@ func TestParseStartTagAttrsTruncatedAttr(t *testing.T) {
 	resMap := buildResourceMapChunk([]uint32{AttrVersionCode, AttrVersionName})
 
 	var startTag bytes.Buffer
-	startTag.Write(u16le(0x0102)) // chunk type
-	startTag.Write(u16le(0x0010)) // header size
-	startTag.Write(u32le(44))     // chunk size = 44 (only 12/20 attr bytes written)
-	startTag.Write(u32le(0))      // lineNumber
-	startTag.Write(u32le(0))      // comment
+	startTag.Write(u16le(0x0102))     // chunk type
+	startTag.Write(u16le(0x0010))     // header size
+	startTag.Write(u32le(44))         // chunk size = 44 (only 12/20 attr bytes written)
+	startTag.Write(u32le(0))          // lineNumber
+	startTag.Write(u32le(0))          // comment
 	startTag.Write(u32le(0xFFFFFFFF)) // ns
 	startTag.Write(u32le(0xFFFFFFFF)) // name
-	startTag.Write(u16le(20))     // attributeStart (not used by parser)
-	startTag.Write(u16le(20))     // attributeSize
-	startTag.Write(u16le(1))      // attributeCount = 1
-	startTag.Write(u16le(0))      // idIndex
-	startTag.Write(u16le(0))      // classIndex
-	startTag.Write(u16le(0))      // styleIndex
+	startTag.Write(u16le(20))         // attributeStart (not used by parser)
+	startTag.Write(u16le(20))         // attributeSize
+	startTag.Write(u16le(1))          // attributeCount = 1
+	startTag.Write(u16le(0))          // idIndex
+	startTag.Write(u16le(0))          // classIndex
+	startTag.Write(u16le(0))          // styleIndex
 	// Only 12 bytes of the attribute (normally 20). The parser reads 20 bytes
 	// starting at at, so at+20 overflows → break → no attrs found.
 	startTag.Write(u32le(0xFFFFFFFF)) // ns
-	startTag.Write(u32le(0))         // nameIdx
-	startTag.Write(u32le(0))         // rawValueIdx
+	startTag.Write(u32le(0))          // nameIdx
+	startTag.Write(u32le(0))          // rawValueIdx
 	// Missing: 2 bytes size + 1 byte res0 + 1 byte dataType + 4 bytes data = 8 bytes
 
 	var body bytes.Buffer

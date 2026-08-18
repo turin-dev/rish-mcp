@@ -43,6 +43,9 @@ const (
 	chunkResourceMap = 0x00080180
 	chunkStartTag    = 0x00100102
 	axmlMagic        = 0x00080003
+	// The compressed APK is capped separately by the release source. Bound the
+	// inflated manifest too so a small zip cannot force an unbounded allocation.
+	maxAndroidManifestBytes = int64(16 << 20)
 )
 
 var (
@@ -51,15 +54,18 @@ var (
 	infoCache    ApkInfo
 )
 
-// ReadApkInfo parses the APK at path. Cached on size+mtime, so replacing the
-// file (a fresh build landing) is picked up without a restart while repeated
-// requests stay cheap.
+// ReadApkInfo parses the APK at path. Cached on path+size+mtime, so replacing
+// the file (a fresh build landing) is picked up without a restart, distinct
+// immutable APKs cannot alias in the cache, and repeated requests stay cheap.
 func ReadApkInfo(path string) (ApkInfo, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return ApkInfo{}, err
 	}
-	key := fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+	if st.Size() > maxAPKDownloadBytes {
+		return ApkInfo{}, fmt.Errorf("APK is too large: %d bytes exceeds %d", st.Size(), maxAPKDownloadBytes)
+	}
+	key := fmt.Sprintf("%s:%d:%d", path, st.Size(), st.ModTime().UnixNano())
 
 	infoCacheMu.Lock()
 	if infoCacheKey == key {
@@ -97,10 +103,13 @@ func parseApk(data []byte) (ApkInfo, error) {
 	if err != nil {
 		return ApkInfo{}, fmt.Errorf("AndroidManifest.xml not found in apk: %w", err)
 	}
-	axml, err := io.ReadAll(f)
+	axml, err := io.ReadAll(io.LimitReader(f, maxAndroidManifestBytes+1))
 	_ = f.Close()
 	if err != nil { // unreachable: zip.Reader from bytes.Reader never returns read errors
 		return ApkInfo{}, err
+	}
+	if int64(len(axml)) > maxAndroidManifestBytes {
+		return ApkInfo{}, fmt.Errorf("AndroidManifest.xml exceeds %d bytes", maxAndroidManifestBytes)
 	}
 
 	versionName, versionCode, err := parseManifest(axml)
@@ -206,7 +215,13 @@ func parseStringPool(buf []byte, start int) ([]string, error) {
 	if start+28 > len(buf) {
 		return nil, errors.New("truncated string pool header")
 	}
-	count := int(le32(buf, start+8))
+	rawCount := le32(buf, start+8)
+	// Prove that the complete uint32 offset table fits before converting the
+	// attacker-controlled count to int or using it as a slice capacity.
+	if uint64(rawCount) > uint64(len(buf)-(start+28))/4 {
+		return nil, errors.New("truncated string pool offset table")
+	}
+	count := int(rawCount)
 	flags := le32(buf, start+16)
 	stringsStart := int(le32(buf, start+20))
 	utf8 := flags&(1<<8) != 0
