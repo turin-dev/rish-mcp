@@ -2,11 +2,16 @@
 
 Interactive installer for the [rish-mcp](https://github.com/turin-dev/rish-mcp) Android agent — the thing that lets an AI run shell commands on a real Android device over MCP.
 
-```
-npx rish-mcp-setup
+```bash
+git clone https://github.com/turin-dev/rish-mcp.git
+cd rish-mcp
+npx rish-mcp-setup --server=
 ```
 
-No install, no Go toolchain, no Android SDK required just to run it.
+The empty `--server=` value forces a local APK build. This is currently
+required because GitHub releases through `v0.5.0` contain the legacy
+Shizuku-based application, not the no-Shizuku rewrite. No global install, Go
+toolchain, or host Android SDK is required, but local APK builds require Docker.
 
 ## What it does
 
@@ -25,7 +30,10 @@ One thing it deliberately does **not** do: drive the Android 11+ wireless-pairin
 npx rish-mcp-setup --server https://your-version-server.example.com
 ```
 
-`--server` (or the `RISH_MCP_SERVER` env var) points at a rish-mcp version server to download a prebuilt APK from. Without it, building locally falls back to Docker.
+`--server` (or the `RISH_MCP_SERVER` env var) points at an explicitly trusted,
+rewrite-compatible rish-mcp version server. Without it, the safe default is to
+build locally with Docker. The legacy public APK must not be used with the
+current rewrite; see [`../docs/RELEASES.md`](../docs/RELEASES.md).
 
 ### Non-interactive setup
 
@@ -34,10 +42,10 @@ For scripts or a fresh machine where no one can answer prompts, pass `--yes`
 
 ```bash
 # Full device setup; accepts defaults and uses RISH_MCP_* environment values.
-npx rish-mcp-setup --yes --action setup
+npx rish-mcp-setup --yes --action setup --server=
 
 # Only acquire an APK.
-npx rish-mcp-setup --yes --action apk
+npx rish-mcp-setup --yes --action apk --server=
 
 # Start the relay from a checkout, or use the published fallback image.
 npx rish-mcp-setup --yes --action relay
@@ -59,7 +67,8 @@ APK/build for APK acquisition, and `adb` plus an authorized device for full setu
 
 ## Also available as a Go binary
 
-Same tool, same flow, ported 1:1 — see [`server/cmd/setup`](https://github.com/turin-dev/rish-mcp/tree/revive/server/cmd/setup) if you'd rather have a single static binary than a Node dependency.
+Same tool, same flow, ported 1:1 — see [`server/cmd/setup`](../server/cmd/setup)
+if you'd rather have a single static binary than a Node dependency.
 
 ## License
 

@@ -1,5 +1,9 @@
 # rish-mcp
 
+[![CI](https://github.com/turin-dev/rish-mcp/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/turin-dev/rish-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/turin-dev/rish-mcp/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/turin-dev/rish-mcp/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Expose an Android device's own shell (uid 2000, like `adb shell`) to AIs as an
 **MCP tool** — without VPN, adb-from-a-PC-forever, or sshd. The device holds a
 single **outbound** WebSocket to a relay on a public hostname you control; AIs
@@ -24,6 +28,13 @@ call the relay's MCP endpoint.
 > [`plan.md`](plan.md) for why it was rebuilt and [`docs/DESIGN.md`](docs/DESIGN.md)
 > for the current architecture and what's actually implemented vs. still
 > pending — read that before assuming anything below is production-ready.
+
+> [!CAUTION]
+> GitHub releases `v0.2.0` through `v0.5.0` contain the legacy Shizuku-based
+> application. They are not compatible release artifacts for this rewrite.
+> A signed, real-device-verified rewrite APK has not been published yet. Until
+> one is available, build the Android app from this checkout; see
+> [Release channels](docs/RELEASES.md) for the versioning boundary and gates.
 
 ## Why rewrite
 
@@ -58,6 +69,7 @@ Wear OS performance, server code quality, no official version endpoint).
 | Low-spec hybrid connection + FCM wake | ⛔ blocked — needs a Firebase project (see `docs/DESIGN.md` §7) |
 | Docker packaging for the Go binaries | ✅ `server/Dockerfile` (`--target relay` / `--target publicserver`) |
 | docker-compose / reverse-proxy deploy config | ✅ `docker-compose.yml` (Traefik/Dokploy) |
+| Signed rewrite APK release | ⛔ not published — legacy releases are incompatible |
 
 ## Components
 
@@ -70,18 +82,21 @@ Wear OS performance, server code quality, no official version endpoint).
   `adbd` to run commands as shell uid, a foreground service holds the
   outbound WS, auto-starts on boot.
 
-## Quick start: Android setup CLI
+## Quick start: local Android build and setup
 
-If you want the guided installer rather than building the APK and configuring
-`adb` by hand, run it directly with `npx`:
+The currently published npm CLI still knows about the legacy download server,
+so explicitly disable remote APK download and build from this checkout:
 
 ```bash
-npx rish-mcp-setup
+git clone https://github.com/turin-dev/rish-mcp.git
+cd rish-mcp
+npx rish-mcp-setup --server=
 ```
 
-It requires Node.js 18 or newer and does not install globally. For scripts, use
-`--yes --action setup|apk|relay`; see [`cli/README.md`](cli/README.md) for all
-options and environment variables.
+This requires Node.js 18+, Docker, and `adb`; it does not install the CLI
+globally. The empty `--server=` value is deliberate and forces a local build.
+For scripts, add `--yes --action setup|apk|relay`. See
+[`cli/README.md`](cli/README.md) for all options and prerequisites.
 
 ## Build
 
@@ -93,12 +108,16 @@ cd server && go build ./... && go test ./...
 docker build --target relay -t rishmcp-relay server
 docker build --target publicserver -t rishmcp-public server
 
-# Android APK (Android SDK + Gradle run inside Docker; host stays clean)
-cd app && docker build -t rishmcp-android-build -f Dockerfile.build .
-# then run gradle assembleDebug/assembleRelease inside that image — see
-# before/app/build-apk.sh for the release-signing flow this hasn't been
-# re-ported to yet.
+# Android unit tests + debug APK (run from the repository root)
+docker build -t rishmcp-android-build -f app/Dockerfile.build app
+docker run --rm -v "$PWD/app:/work" -w /work rishmcp-android-build \
+  gradle --no-daemon testDebugUnitTest assembleDebug
+# output: app/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The rewrite does not yet have a supported release-signing command. Do not
+publish the debug APK as an official release; the acceptance and signing gates
+are documented in [`docs/RELEASES.md`](docs/RELEASES.md).
 
 ## Deploy
 
@@ -136,7 +155,8 @@ Same tool surface as before — this part of the contract didn't change:
 }
 ```
 
-- `list_devices()` — connected devices, with agent version + update flag.
+- `list_devices()` — connected devices, agent version, connection age, and
+  pending-command count.
 - `run_shell({cmd, deviceId?, timeoutMs?})` — run a command as shell uid;
   returns stdout, stderr, exit code.
 
@@ -153,3 +173,8 @@ Full tool reference, OAuth flow, and the WS relay protocol are documented in
   `adb shell`.
 - Scope is the **owner's own device** for personal automation, same as
   before — see `plan.md`'s explicit "multi-tenant 아님" non-goal.
+
+Please report vulnerabilities privately as described in
+[`SECURITY.md`](SECURITY.md). Contributions are welcome under the
+[`MIT License`](LICENSE); see [`CONTRIBUTING.md`](CONTRIBUTING.md) before
+opening a pull request.

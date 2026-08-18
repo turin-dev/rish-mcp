@@ -239,15 +239,38 @@ the consent page — paste `AI_TOKEN` once.
 
 ```bash
 curl -s https://dl.example.com/api/version/release
-# {"versionName":"0.1.0","versionCode":1,"tag":"v0.1.0",
+# {"versionName":"0.1.0","versionCode":1,"tag":"agent-v0.1.0",
 #  "sizeBytes":...,"sha256":"...","modifiedAt":"...","download":"/agent.apk"}
 
 curl -sO https://dl.example.com/agent.apk    # no token needed
 ```
 
-It polls GitHub for the newest release with a `.apk` asset, caches it, and
-keeps serving the last-good copy if a fetch or parse fails. It has no route
-to the relay and holds no tokens or device information.
+It lists stable GitHub releases in the configured channel and selects the
+highest semantic version, rather than trusting GitHub creation order or the
+repository-wide `latest` release. A channel tag must be exactly
+`RELEASE_TAG_PREFIX` + `MAJOR.MINOR.PATCH`; the default prefix is `agent-v`, so
+a rewrite release is tagged, for example, `agent-v0.1.0`. This separate channel
+intentionally excludes historical `v0.2`–`v0.5` releases, which contain the
+legacy Shizuku app rather than the rewrite agent.
+
+Release-list pagination is scanned to a safety bound of 1,000 entries. If the
+final page cannot be reached within that bound, the refresh is rejected as a
+whole instead of publishing a potentially lower version from a partial list.
+
+Before publication, the tag suffix must exactly match the APK's embedded
+`versionName`, its Android `versionCode` must be greater than the currently
+served rewrite release, and the tag version itself must increase. Downloads
+larger than 128 MiB are rejected. A failed download, parse, validation, or
+metadata update leaves the last-good release in service. The 128 MiB file cap
+also applies when restoring a cache or reading the `APK_PATH` override.
+Validated APKs use immutable SHA-256-based cache filenames; `release.json` is
+the small mutable pointer recovered after an ordinary process interruption
+(not a power-loss durability guarantee). On startup, non-current
+content-addressed APKs are removed only after a valid current pointer is loaded
+and no unresolved metadata backup remains. Treat the cache as single-writer:
+run only one public-server process per `RELEASE_CACHE_DIR`. `APK_PATH` remains
+the local development override and disables GitHub polling. The public server
+has no route to the relay and holds no tokens or device information.
 
 ---
 
@@ -303,8 +326,9 @@ Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
 | `PORT` | | `8080` | Listen port |
 | `TRUSTED_PROXIES` | | empty | Comma-separated proxy IPs allowed to set `X-Forwarded-For` |
 | `DOWNLOADS_PER_HOUR` | | `30` | Per-IP cap on `/agent.apk` |
-| `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose latest release supplies the APK |
+| `GITHUB_REPO` | | `turin-dev/rish-mcp` | Repo whose compatible release supplies the APK |
+| `RELEASE_TAG_PREFIX` | | `agent-v` | Rewrite release channel; accepted tags are exactly `<prefix>MAJOR.MINOR.PATCH`, and the highest compatible version is selected |
 | `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |
 | `RELEASE_POLL_MS` | | `900000` | How often to check GitHub for a newer release |
 | `GITHUB_API_BASE` | | `https://api.github.com` | Overridable for testing |
-| `APK_PATH` | | — | Serve this local APK instead of fetching a release; disables GitHub polling |
+| `APK_PATH` | | — | Serve this local APK (maximum 128 MiB) instead of fetching a release; disables GitHub polling |

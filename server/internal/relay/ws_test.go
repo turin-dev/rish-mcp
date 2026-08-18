@@ -224,13 +224,17 @@ func TestRegisterAgentReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
 	}
+	defer client1.Close()
 	server1 := <-gotConn1
-	time.Sleep(50 * time.Millisecond)
 
-	// Verify first device is registered
-	if _, err := reg.resolve("replace-me"); err != nil {
-		t.Fatalf("first device should be registered: %v", err)
-	}
+	// The handshake and handler goroutine are scheduled independently. Wait for
+	// the first registry write instead of assuming it completes within a sleep.
+	var firstDevice *Device
+	waitForRelayCondition(t, "first replacement-test registration", func() bool {
+		var ok bool
+		firstDevice, ok = reg.get("replace-me")
+		return ok
+	})
 
 	// Second connection with same deviceId
 	gotConn2 := make(chan *websocket.Conn, 1)
@@ -250,16 +254,17 @@ func TestRegisterAgentReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 2: %v", err)
 	}
+	defer client2.Close()
 	server2 := <-gotConn2
-	time.Sleep(50 * time.Millisecond)
 
-	// The device should still be registered (replaced, not removed)
-	if _, err := reg.resolve("replace-me"); err != nil {
-		t.Fatalf("device should still be registered after replacement: %v", err)
-	}
+	// Wait until replacement is observable as a different Device pointer. This
+	// also proves the old connection's deferred cleanup did not remove the new
+	// registry entry.
+	waitForRelayCondition(t, "second replacement-test registration", func() bool {
+		current, ok := reg.get("replace-me")
+		return ok && current != firstDevice
+	})
 
-	_ = client1
-	_ = client2
 	_ = server1.Close()
 	_ = server2.Close()
 }
@@ -267,7 +272,7 @@ func TestRegisterAgentReplacement(t *testing.T) {
 // TestRegisterAgentInvalidFrame verifies that a non-JSON message from the agent
 // is logged and the connection is not terminated.
 func TestRegisterAgentInvalidFrame(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -276,6 +281,7 @@ func TestRegisterAgentInvalidFrame(t *testing.T) {
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	gotConn := make(chan *websocket.Conn, 1)
+	handlerDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -285,6 +291,7 @@ func TestRegisterAgentInvalidFrame(t *testing.T) {
 		gotConn <- conn
 		// registerAgent will read messages in a loop — we send a bad frame,
 		// then a close frame.
+		defer close(handlerDone)
 		registerAgent(reg, conn, r.URL.Query())
 	}))
 	defer srv.Close()
@@ -300,7 +307,9 @@ func TestRegisterAgentInvalidFrame(t *testing.T) {
 		t.Fatalf("write invalid frame: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	waitForRelayCondition(t, "invalid result frame log", func() bool {
+		return strings.Contains(buf.String(), "invalid result frame")
+	})
 
 	// Check that the invalid frame was logged
 	if !strings.Contains(buf.String(), "invalid result frame") {
@@ -313,6 +322,7 @@ func TestRegisterAgentInvalidFrame(t *testing.T) {
 	}
 
 	_ = client.Close()
+	waitForRelayDone(t, "invalid-frame handler", handlerDone)
 }
 
 // TestRegisterAgentValidResultFrame verifies that a valid result frame is
@@ -483,6 +493,60 @@ func TestRegisterAgentCustomValues(t *testing.T) {
 	_ = client.Close()
 }
 
+func waitForRelayCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type synchronizedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func startRegisterAgentPingForTest(t *testing.T, reg *Registry, conn *websocket.Conn, q url.Values, pingEvery time.Duration) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		registerAgentPing(reg, conn, q, pingEvery)
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		waitForRelayDone(t, "registerAgentPing", done)
+	})
+	return done
+}
+
+func waitForRelayDone(t *testing.T, description string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s to stop", description)
+	}
+}
+
 // TestRegisterAgentReplacementWithOldConn tests that when a device reconnects,
 // the old connection is disconnected.
 func TestRegisterAgentReplacementWithOldConn(t *testing.T) {
@@ -508,28 +572,38 @@ func TestRegisterAgentReplacementWithOldConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	defer client1.Close()
 
-	// Get the old device to verify its conn is cleared
-	oldDevice, _ := reg.get("replace-me-2")
+	// Dial returning only proves the WebSocket handshake completed. Wait for the
+	// handler goroutine to install the first device before retaining its pointer.
+	var oldDevice *Device
+	waitForRelayCondition(t, "first agent registration", func() bool {
+		var ok bool
+		oldDevice, ok = reg.get("replace-me-2")
+		return ok
+	})
 
 	// Second connection with same deviceId — should trigger replacement
 	client2, _, err := websocket.DefaultDialer.Dial(baseURL+"/agent?deviceId=replace-me-2", nil)
 	if err != nil {
 		t.Fatalf("dial 2: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	defer client2.Close()
+
+	// First wait until the registry points at a distinct device. Then wait for
+	// disconnect cleanup on the retained old object; these are separate steps
+	// in registerAgent and can be observed independently by this goroutine.
+	waitForRelayCondition(t, "replacement agent registration", func() bool {
+		current, ok := reg.get("replace-me-2")
+		return ok && current != oldDevice
+	})
 
 	// Old device's conn should be nil (disconnect cleared it)
-	oldDevice.mu.Lock()
-	oldConnWasNil := oldDevice.conn == nil
-	oldDevice.mu.Unlock()
-	if !oldConnWasNil {
-		t.Fatal("expected old device connection to be cleared after replacement")
-	}
-
-	_ = client1
-	_ = client2.Close()
+	waitForRelayCondition(t, "old agent disconnect cleanup", func() bool {
+		oldDevice.mu.Lock()
+		defer oldDevice.mu.Unlock()
+		return oldDevice.conn == nil
+	})
 }
 
 // TestHandleAgentUpgradeFailure verifies that when the WebSocket upgrade fails,
@@ -636,7 +710,7 @@ func TestPongHandlerUpdatesLastSeen(t *testing.T) {
 
 	// Use a very long ping interval so the ticker doesn't interfere.
 	q := url.Values{"deviceId": {"pong-handler-test"}}
-	go registerAgentPing(reg, server, q, time.Hour)
+	done := startRegisterAgentPingForTest(t, reg, server, q, time.Hour)
 	time.Sleep(50 * time.Millisecond)
 
 	d, ok := reg.get("pong-handler-test")
@@ -662,6 +736,8 @@ func TestPongHandlerUpdatesLastSeen(t *testing.T) {
 	if updated.Before(time.Now().Add(-5 * time.Second)) {
 		t.Fatal("expected lastSeen to be updated after pong, but it was not")
 	}
+	_ = client.Close()
+	waitForRelayDone(t, "pong-handler registerAgentPing", done)
 }
 
 // --- staleness test ---
@@ -669,7 +745,7 @@ func TestPongHandlerUpdatesLastSeen(t *testing.T) {
 // TestRegisterAgentStaleDisconnect verifies that the ticker goroutine detects
 // a stale device (no traffic for >2.5 ping intervals) and disconnects it.
 func TestRegisterAgentStaleDisconnect(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -679,11 +755,11 @@ func TestRegisterAgentStaleDisconnect(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 
 	q := url.Values{"deviceId": {"stale-test"}}
-	go registerAgentPing(reg, server, q, 10*time.Millisecond)
+	done := startRegisterAgentPingForTest(t, reg, server, q, 10*time.Millisecond)
 
-	// Wait for enough ticks to trigger staleness. With a 10ms ping interval,
-	// staleAfter = 25ms, so the third tick (~30ms) should detect staleness.
-	time.Sleep(100 * time.Millisecond)
+	// With a 10ms ping interval, staleAfter = 25ms, so the third tick (~30ms)
+	// should detect staleness and terminate the handler.
+	waitForRelayDone(t, "stale registerAgentPing", done)
 
 	// Device should be disconnected from the registry.
 	if _, err := reg.resolve("stale-test"); err == nil {
@@ -704,7 +780,7 @@ func TestRegisterAgentStaleDisconnect(t *testing.T) {
 // error branch ("read failed") — never "connection closed" (raw io.EOF), which
 // gorilla cannot produce on a live socket.
 func TestRegisterAgentConnectionClosedEOF(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -713,7 +789,7 @@ func TestRegisterAgentConnectionClosedEOF(t *testing.T) {
 	server, client := testDevicePair(t)
 
 	q := url.Values{"deviceId": {"eof-test"}}
-	go registerAgentPing(reg, server, q, time.Hour)
+	done := startRegisterAgentPingForTest(t, reg, server, q, time.Hour)
 	time.Sleep(50 * time.Millisecond)
 
 	// Half-close the client's TCP write side — sends a FIN to the server.
@@ -725,13 +801,7 @@ func TestRegisterAgentConnectionClosedEOF(t *testing.T) {
 		t.Fatalf("CloseWrite: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(buf.String(), "read failed") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForRelayDone(t, "EOF registerAgentPing", done)
 
 	logOutput := buf.String()
 	// gorilla v1.5.3 can never surface raw io.EOF here: a FIN mid-frame becomes
@@ -753,7 +823,7 @@ func TestRegisterAgentConnectionClosedEOF(t *testing.T) {
 // enough (50ms → staleAfter=125ms) that CloseWrite at 80ms runs before the
 // staleness check, and the next tick (100ms) hits the broken write half.
 func TestRegisterAgentPingFailed(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -762,7 +832,7 @@ func TestRegisterAgentPingFailed(t *testing.T) {
 	server, client := testDevicePair(t)
 
 	q := url.Values{"deviceId": {"ping-fail-test"}}
-	go registerAgentPing(reg, server, q, 50*time.Millisecond)
+	done := startRegisterAgentPingForTest(t, reg, server, q, 50*time.Millisecond)
 	time.Sleep(80 * time.Millisecond)
 
 	// Close the server's write half. The read loop stays blocked (client never
@@ -775,7 +845,7 @@ func TestRegisterAgentPingFailed(t *testing.T) {
 		t.Fatalf("CloseWrite: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	waitForRelayDone(t, "ping-failure registerAgentPing", done)
 
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "ping failed") {
@@ -789,7 +859,7 @@ func TestRegisterAgentPingFailed(t *testing.T) {
 // TestRegisterAgentTruncatedFrame verifies that frames larger than 256 bytes
 // are truncated in the error log with "...".
 func TestRegisterAgentTruncatedFrame(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -801,7 +871,7 @@ func TestRegisterAgentTruncatedFrame(t *testing.T) {
 	// Use a long ping interval so the staleness ticker doesn't fire and
 	// disconnect the device before the assertion runs.
 	q := url.Values{"deviceId": {"truncated-test"}}
-	go registerAgentPing(reg, server, q, time.Hour)
+	done := startRegisterAgentPingForTest(t, reg, server, q, time.Hour)
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a 300-byte invalid JSON frame — the log should truncate it to 256 + "...".
@@ -810,7 +880,9 @@ func TestRegisterAgentTruncatedFrame(t *testing.T) {
 		t.Fatalf("write long frame: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	waitForRelayCondition(t, "truncated invalid result frame log", func() bool {
+		return strings.Contains(buf.String(), "invalid result frame")
+	})
 
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "...") {
@@ -824,6 +896,8 @@ func TestRegisterAgentTruncatedFrame(t *testing.T) {
 	if _, err := reg.resolve("truncated-test"); err != nil {
 		t.Fatalf("device should still be registered after invalid frame: %v", err)
 	}
+	_ = client.Close()
+	waitForRelayDone(t, "truncated-frame registerAgentPing", done)
 }
 
 // --- log injection test ---
@@ -834,7 +908,7 @@ func TestRegisterAgentTruncatedFrame(t *testing.T) {
 // regression test for the fix that replaced raw deviceID with logDeviceID
 // (sanitizeLogField output) in the disconnect/stale/ping/read/frame logs.
 func TestRegisterAgentLogInjection(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedLogBuffer
 	old := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(old) })
@@ -849,7 +923,7 @@ func TestRegisterAgentLogInjection(t *testing.T) {
 	const evilID = "evil\n[agent] forged log line"
 	q := url.Values{"deviceId": {evilID}}
 
-	go registerAgentPing(reg, server, q, time.Hour)
+	done := startRegisterAgentPingForTest(t, reg, server, q, time.Hour)
 	time.Sleep(50 * time.Millisecond)
 
 	// Routing must use the RAW id as the registry key — sanitizing for logs
@@ -861,7 +935,7 @@ func TestRegisterAgentLogInjection(t *testing.T) {
 	// sendPing is exercised via a separate test; to reach the stale/read
 	// failure logs, tear down the connection and wait for the handler to notice.
 	client.Close()
-	time.Sleep(150 * time.Millisecond)
+	waitForRelayDone(t, "log-injection registerAgentPing", done)
 
 	logOutput := buf.String()
 

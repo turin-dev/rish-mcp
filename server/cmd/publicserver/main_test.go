@@ -150,7 +150,7 @@ func writeCachedRelease(t *testing.T, versionName string) *release.Source {
 		t.Fatalf("write apk: %v", err)
 	}
 	meta, _ := json.Marshal(map[string]string{
-		"tag":       "v2.0.0",
+		"tag":       "agent-v" + versionName,
 		"fetchedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err := os.WriteFile(filepath.Join(cacheDir, "release.json"), meta, 0o644); err != nil {
@@ -220,8 +220,8 @@ func TestVersionHandlerWithRelease(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode version body: %v", err)
 	}
-	if body.VersionName != "2.3.4" || body.VersionCode != 7 || body.Tag != "v2.0.0" || body.Download != "/agent.apk" {
-		t.Errorf("version body = %+v, want versionName=2.3.4 versionCode=7 tag=v2.0.0 download=/agent.apk", body)
+	if body.VersionName != "2.3.4" || body.VersionCode != 7 || body.Tag != "agent-v2.3.4" || body.Download != "/agent.apk" {
+		t.Errorf("version body = %+v, want versionName=2.3.4 versionCode=7 tag=agent-v2.3.4 download=/agent.apk", body)
 	}
 }
 
@@ -498,16 +498,7 @@ func TestContentDispositionNoInjection(t *testing.T) {
 			if err := os.WriteFile(apkPath, apkBytes, 0o644); err != nil {
 				t.Fatalf("write apk: %v", err)
 			}
-			meta, err := json.Marshal(map[string]string{"tag": "v1.0.0"})
-			if err != nil {
-				t.Fatalf("marshal meta: %v", err)
-			}
-			metaPath := filepath.Join(cacheDir, "release.json")
-			if err := os.WriteFile(metaPath, meta, 0o644); err != nil {
-				t.Fatalf("write release.json: %v", err)
-			}
-
-			src := release.NewSource(release.SourceOptions{CacheDir: cacheDir, PollEvery: time.Hour})
+			src := release.NewSource(release.SourceOptions{LocalAPK: apkPath})
 			src.Start(context.Background())
 			mux := newMux(src, 30, "")
 			srv := httptest.NewServer(mux)
@@ -555,12 +546,7 @@ func TestContentDispositionFilenameEscaping(t *testing.T) {
 	if err := os.WriteFile(apkPath, apkBytes, 0o644); err != nil {
 		t.Fatalf("write apk: %v", err)
 	}
-	meta, _ := json.Marshal(map[string]string{"tag": "v1.0.0"})
-	if err := os.WriteFile(filepath.Join(cacheDir, "release.json"), meta, 0o644); err != nil {
-		t.Fatalf("write release.json: %v", err)
-	}
-
-	src := release.NewSource(release.SourceOptions{CacheDir: cacheDir, PollEvery: time.Hour})
+	src := release.NewSource(release.SourceOptions{LocalAPK: apkPath})
 	src.Start(context.Background())
 	mux := newMux(src, 30, "")
 	srv := httptest.NewServer(mux)

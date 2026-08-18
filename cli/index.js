@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { downloadFile } from "./download.js";
-import { parseArgs } from "./args.js";
+import { parseArgs, resolveServerURL } from "./args.js";
 
 // --- styling ---
 
@@ -51,7 +51,7 @@ const packageVersion = JSON.parse(readFileSync(new URL("./package.json", import.
 if (help || version) {
   if (version) console.log(packageVersion);
   if (help) {
-    console.log(`rish-mcp-setup ${packageVersion}\n\nUsage:\n  npx rish-mcp-setup [options]\n\nOptions:\n  --action <setup|apk|relay>  Run one action in non-interactive mode\n  --server <url>             Download the APK from a version server\n  --yes, -y                  Accept defaults and exit after one action\n  --help, -h                 Show this help\n  --version, -v              Show the package version\n\nEnvironment:\n  RISH_MCP_SERVER             Default version-server URL\n  RISH_MCP_YES=1              Enable non-interactive mode\n\nRequires Node.js >= 18.`);
+    console.log(`rish-mcp-setup ${packageVersion}\n\nUsage:\n  npx rish-mcp-setup [options]\n\nOptions:\n  --action <setup|apk|relay>  Run one action in non-interactive mode\n  --server <url>             Download from an explicitly trusted version server\n  --yes, -y                  Accept defaults and exit after one action\n  --help, -h                 Show this help\n  --version, -v              Show the package version\n\nEnvironment:\n  RISH_MCP_SERVER             Version-server URL; unset builds the APK locally\n  RISH_MCP_YES=1              Enable non-interactive mode\n\nRequires Node.js >= 18.`);
   }
   exit(0);
 }
@@ -553,10 +553,10 @@ async function runDeviceSetup(serverURL) {
 // --- menu ---
 
 async function main() {
-  let serverURL = process.env.RISH_MCP_SERVER || "https://rish-mcp.turin.my";
-  if (cliArgs.some((a) => a === "--server" || a.startsWith("--server="))) {
-    serverURL = argValue("--server") ?? ""; // --server (no value) or --server "" forces a local build
-  }
+  // Fail closed: legacy GitHub releases contain the Shizuku implementation.
+  // Build the rewrite locally unless the user explicitly trusts a compatible
+  // version server via --server or RISH_MCP_SERVER.
+  const serverURL = resolveServerURL(cliArgs, process.env);
 
   banner("rish-mcp setup", "adb + pairing + build + relay, all from one place.");
 

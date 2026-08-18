@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible problem in the current no-Shizuku rewrite.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include tokens, private relay URLs, keystores, or device-identifying data.
+        Security vulnerabilities belong in the private Security advisory form.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Android agent
+        - Go relay or MCP server
+        - Public APK/version server
+        - Setup CLI
+        - Product website
+        - Docker or deployment
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Commit SHA, tag, npm package version, or container digest.
+      placeholder: 67bc188 or rish-mcp-setup 0.x.y
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Android version/device class, host OS, Docker, Go, and Node versions as relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start ...
+        2. Connect ...
+        3. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+      description: Remove tokens, private URLs, and device identifiers before pasting logs.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this on the current `master` branch or explained why I could not.
+          required: true
+        - label: I removed secrets and personally identifying device data from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

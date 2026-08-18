@@ -1,0 +1,10 @@
+name: rish-mcp rewrite
+
+# `before/` is retained as unsupported historical reference. Keep the security
+# dashboard focused on code that can actually ship from the current rewrite.
+paths-ignore:
+  - before/**
+  - "**/node_modules/**"
+  - server/dist/**
+  - web/.next/**
+  - app/**/build/**

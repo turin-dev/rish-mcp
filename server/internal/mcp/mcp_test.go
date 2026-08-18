@@ -216,7 +216,9 @@ func TestHandleToolsCallSuccess(t *testing.T) {
 	s.RegisterTool(Tool{
 		Name: "greet",
 		Handler: func(ctx context.Context, args json.RawMessage) (CallResult, error) {
-			var p struct{ Name string `json:"name"` }
+			var p struct {
+				Name string `json:"name"`
+			}
 			json.Unmarshal(args, &p)
 			return CallResult{Content: []ContentItem{{Type: "text", Text: "hello " + p.Name}}}, nil
 		},

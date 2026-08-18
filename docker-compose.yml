@@ -40,6 +40,7 @@ services:
     environment:
       PORT: "8080"
       GITHUB_REPO: "${GITHUB_REPO:-turin-dev/rish-mcp}"
+      RELEASE_TAG_PREFIX: "${RELEASE_TAG_PREFIX:-agent-v}"
       RELEASE_CACHE_DIR: /var/cache/rish-mcp
       DOWNLOADS_PER_HOUR: "${DOWNLOADS_PER_HOUR:-30}"
       RELEASE_POLL_MS: "${RELEASE_POLL_MS:-900000}"

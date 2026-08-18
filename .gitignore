@@ -1,5 +1,17 @@
-# IDE
+# Editors and operating-system files
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# JavaScript / TypeScript dependencies and generated output
+**/node_modules/
+server/dist/
+web/.next/
+web/out/
+web/coverage/
+*.tsbuildinfo
 
 # Android app
 app/.gradle/
@@ -12,6 +24,7 @@ app/build.log
 app/.android/
 app/analytics.settings
 app/.kotlin/
+app/local.properties
 
 # Firebase config — never commit the real one (docs/DESIGN.md §3.2/§7).
 # app/app/google-services.json.example stays committed as the template.
@@ -21,9 +34,23 @@ app/app/google-services.json
 server/relay
 server/publicserver
 server/setup
+server/coverage.out
+server/*.test
 
 # Secrets
 .env
 *.env
+.env.*
 *.bak.*
 !.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Logs and local reports
+*.log
+coverage/
+coverage.out
