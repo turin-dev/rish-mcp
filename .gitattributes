@@ -1,0 +1,24 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.go text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.kt text eol=lf
+*.kts text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.apk binary
+*.aab binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
