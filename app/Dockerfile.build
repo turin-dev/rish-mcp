@@ -1,6 +1,6 @@
 # Android build toolchain (SDK + Gradle) — used only to assemble/test the app.
 # Nothing from this image runs in production.
-FROM eclipse-temurin:17-jdk-jammy
+FROM eclipse-temurin:22-jdk-jammy
 
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV DEBIAN_FRONTEND=noninteractive
