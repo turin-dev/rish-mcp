@@ -19,6 +19,13 @@ func testOAuthProvider() *oauth.Provider {
 	return oauth.NewProvider(oauth.Config{PublicURL: "http://test.invalid", AIToken: "ai-token"})
 }
 
+func TestBuildMCPServerVersion(t *testing.T) {
+	s := buildMCPServer(relay.NewRegistry(), 5*time.Second, 30*time.Second)
+	if s.Name != "rish-mcp" || s.Version != "1.0.0" {
+		t.Fatalf("server identity = %s@%s, want rish-mcp@1.0.0", s.Name, s.Version)
+	}
+}
+
 // TestRunShellRoundTrip drives the whole skeleton end to end, mirroring
 // before/server/test/smoke.mjs: a fake Android agent dials /agent, then an
 // MCP client lists devices and runs a command through /mcp.
@@ -29,7 +36,7 @@ func TestRunShellRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") +
-		"/agent?token=device-token&deviceId=dev1&name=Pixel&sdk=34&kind=android&ver=0.1.0&vc=1"
+		"/agent?token=device-token&deviceId=dev1&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
@@ -195,7 +202,7 @@ func rawMCPRequest(t *testing.T, base, method, path, body string) *http.Response
 func beginAgent(t *testing.T, base, deviceID string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(base, "http") +
-		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=0.1.0&vc=1"
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
@@ -482,7 +489,7 @@ func fakeAgentWithResult(conn *websocket.Conn, res relay.Result) {
 func beginAgentWithConfig(t *testing.T, base, deviceID string, res relay.Result) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(base, "http") +
-		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=0.1.0&vc=1"
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)

@@ -186,7 +186,7 @@ that stayed fixed across the rewrite.
 ```json
 [
   { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android",
-    "sdk": "36", "agentVersion": "0.1.0", "agentVersionCode": 1,
+    "sdk": "36", "agentVersion": "1.0.0", "agentVersionCode": 2,
     "connectedForMs": 84213, "pending": 0 }
 ]
 ```
@@ -239,7 +239,7 @@ the consent page — paste `AI_TOKEN` once.
 
 ```bash
 curl -s https://dl.example.com/api/version/release
-# {"versionName":"0.1.0","versionCode":1,"tag":"agent-v0.1.0",
+# {"versionName":"1.0.0","versionCode":2,"tag":"agent-v1.0.0",
 #  "sizeBytes":...,"sha256":"...","modifiedAt":"...","download":"/agent.apk"}
 
 curl -sO https://dl.example.com/agent.apk    # no token needed
@@ -249,7 +249,7 @@ It lists stable GitHub releases in the configured channel and selects the
 highest semantic version, rather than trusting GitHub creation order or the
 repository-wide `latest` release. A channel tag must be exactly
 `RELEASE_TAG_PREFIX` + `MAJOR.MINOR.PATCH`; the default prefix is `agent-v`, so
-a rewrite release is tagged, for example, `agent-v0.1.0`. This separate channel
+a rewrite release is tagged, for example, `agent-v1.0.0`. This separate channel
 intentionally excludes historical `v0.2`–`v0.5` releases, which contain the
 legacy Shizuku app rather than the rewrite agent.
 

@@ -25,6 +25,8 @@ import (
 	"github.com/turin-dev/rish-mcp/server/internal/relay"
 )
 
+const relayVersion = "1.0.0"
+
 func main() {
 	cfg, err := loadConfigFromEnv()
 	if err != nil {
@@ -134,7 +136,7 @@ func newMux(
 // contracts (name, args, response text shape) are carried over unchanged
 // from the old TS server — see docs/DESIGN.md §3.3.
 func buildMCPServer(reg *relay.Registry, defaultTimeout, maxTimeout time.Duration) *mcp.Server {
-	s := mcp.NewServer("rish-mcp", "0.1.0")
+	s := mcp.NewServer("rish-mcp", relayVersion)
 
 	s.RegisterTool(mcp.Tool{
 		Name: "run_shell",

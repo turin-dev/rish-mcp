@@ -46,7 +46,11 @@ The npm package `rish-mcp-setup` has its own independent semantic version. A
 CLI package version is not an Android agent version and must not be used to
 select an APK.
 
-No signed rewrite APK has been published yet.
+The current rewrite source identifies itself as `1.0.0`: the Android agent uses
+`versionName 1.0.0` with monotonic `versionCode 2`, the MCP server reports
+`1.0.0`, and the npm setup CLI package is `1.0.0`. This source-version bump does
+not publish an artifact. No signed rewrite APK has been published yet, and the
+`agent-v1.0.0` tag remains reserved until every publication gate below passes.
 
 ## Publication gates
 

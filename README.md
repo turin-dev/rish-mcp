@@ -35,6 +35,9 @@ call the relay's MCP endpoint.
 > A signed, real-device-verified rewrite APK has not been published yet. Until
 > one is available, build the Android app from this checkout; see
 > [Release channels](docs/RELEASES.md) for the versioning boundary and gates.
+> The current source version is **1.0.0** (Android `versionCode` 2), but that is
+> a source milestone—not an assertion that a signed `agent-v1.0.0` release is
+> already available.
 
 ## Why rewrite
 
