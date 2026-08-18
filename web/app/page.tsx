@@ -37,7 +37,7 @@ export default function Home() {
               </a>
               <a
                 className="btn ghost"
-                href="https://github.com/turin-dev/rish-mcp/blob/revive/docs/USAGE.md"
+                href="https://github.com/turin-dev/rish-mcp/blob/master/docs/USAGE.md"
                 target="_blank"
                 rel="noopener"
               >
@@ -125,7 +125,7 @@ export default function Home() {
             <div className="comp-grid">
               <a
                 className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/revive/server/cmd/relay"
+                href="https://github.com/turin-dev/rish-mcp/tree/master/server/cmd/relay"
                 target="_blank"
                 rel="noopener"
               >
@@ -138,7 +138,7 @@ export default function Home() {
                 </p>
                 <span className="more">Browse the source →</span>
               </a>
-              <a className="comp-card" href="https://github.com/turin-dev/rish-mcp/tree/revive/app" target="_blank" rel="noopener">
+              <a className="comp-card" href="https://github.com/turin-dev/rish-mcp/tree/master/app" target="_blank" rel="noopener">
                 <span className="tag mono">app/</span>
                 <h3>Android agent</h3>
                 <p>
@@ -149,7 +149,7 @@ export default function Home() {
               </a>
               <a
                 className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/revive/server/internal/oauth"
+                href="https://github.com/turin-dev/rish-mcp/tree/master/server/internal/oauth"
                 target="_blank"
                 rel="noopener"
               >
@@ -163,7 +163,7 @@ export default function Home() {
               </a>
               <a
                 className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/revive/server/cmd/publicserver"
+                href="https://github.com/turin-dev/rish-mcp/tree/master/server/cmd/publicserver"
                 target="_blank"
                 rel="noopener"
               >

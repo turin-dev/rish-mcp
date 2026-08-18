@@ -224,13 +224,17 @@ func TestRegisterAgentReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
 	}
+	defer client1.Close()
 	server1 := <-gotConn1
-	time.Sleep(50 * time.Millisecond)
 
-	// Verify first device is registered
-	if _, err := reg.resolve("replace-me"); err != nil {
-		t.Fatalf("first device should be registered: %v", err)
-	}
+	// The handshake and handler goroutine are scheduled independently. Wait for
+	// the first registry write instead of assuming it completes within a sleep.
+	var firstDevice *Device
+	waitForRelayCondition(t, "first replacement-test registration", func() bool {
+		var ok bool
+		firstDevice, ok = reg.get("replace-me")
+		return ok
+	})
 
 	// Second connection with same deviceId
 	gotConn2 := make(chan *websocket.Conn, 1)
@@ -250,16 +254,17 @@ func TestRegisterAgentReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 2: %v", err)
 	}
+	defer client2.Close()
 	server2 := <-gotConn2
-	time.Sleep(50 * time.Millisecond)
 
-	// The device should still be registered (replaced, not removed)
-	if _, err := reg.resolve("replace-me"); err != nil {
-		t.Fatalf("device should still be registered after replacement: %v", err)
-	}
+	// Wait until replacement is observable as a different Device pointer. This
+	// also proves the old connection's deferred cleanup did not remove the new
+	// registry entry.
+	waitForRelayCondition(t, "second replacement-test registration", func() bool {
+		current, ok := reg.get("replace-me")
+		return ok && current != firstDevice
+	})
 
-	_ = client1
-	_ = client2
 	_ = server1.Close()
 	_ = server2.Close()
 }
@@ -483,6 +488,20 @@ func TestRegisterAgentCustomValues(t *testing.T) {
 	_ = client.Close()
 }
 
+func waitForRelayCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestRegisterAgentReplacementWithOldConn tests that when a device reconnects,
 // the old connection is disconnected.
 func TestRegisterAgentReplacementWithOldConn(t *testing.T) {
@@ -508,28 +527,38 @@ func TestRegisterAgentReplacementWithOldConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	defer client1.Close()
 
-	// Get the old device to verify its conn is cleared
-	oldDevice, _ := reg.get("replace-me-2")
+	// Dial returning only proves the WebSocket handshake completed. Wait for the
+	// handler goroutine to install the first device before retaining its pointer.
+	var oldDevice *Device
+	waitForRelayCondition(t, "first agent registration", func() bool {
+		var ok bool
+		oldDevice, ok = reg.get("replace-me-2")
+		return ok
+	})
 
 	// Second connection with same deviceId — should trigger replacement
 	client2, _, err := websocket.DefaultDialer.Dial(baseURL+"/agent?deviceId=replace-me-2", nil)
 	if err != nil {
 		t.Fatalf("dial 2: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	defer client2.Close()
+
+	// First wait until the registry points at a distinct device. Then wait for
+	// disconnect cleanup on the retained old object; these are separate steps
+	// in registerAgent and can be observed independently by this goroutine.
+	waitForRelayCondition(t, "replacement agent registration", func() bool {
+		current, ok := reg.get("replace-me-2")
+		return ok && current != oldDevice
+	})
 
 	// Old device's conn should be nil (disconnect cleared it)
-	oldDevice.mu.Lock()
-	oldConnWasNil := oldDevice.conn == nil
-	oldDevice.mu.Unlock()
-	if !oldConnWasNil {
-		t.Fatal("expected old device connection to be cleared after replacement")
-	}
-
-	_ = client1
-	_ = client2.Close()
+	waitForRelayCondition(t, "old agent disconnect cleanup", func() bool {
+		oldDevice.mu.Lock()
+		defer oldDevice.mu.Unlock()
+		return oldDevice.conn == nil
+	})
 }
 
 // TestHandleAgentUpgradeFailure verifies that when the WebSocket upgrade fails,
