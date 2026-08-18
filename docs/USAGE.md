@@ -1,12 +1,12 @@
 # rish-mcp — usage guide
 
 Companion to the [README](../README.md) and [`docs/DESIGN.md`](DESIGN.md).
-This covers deploying the two Go binaries, pairing the Android agent without
-Shizuku, the MCP tool reference, the OAuth flow, and the WS relay protocol.
+This covers deploying the two Go binaries, authorizing the Android agent's
+Shizuku/ADB shell backends, the MCP tool reference, OAuth, and the WS protocol.
 
 - [1. How it fits together](#1-how-it-fits-together)
 - [2. Deploy the relay](#2-deploy-the-relay)
-- [3. Pair the Android agent](#3-pair-the-android-agent)
+- [3. Authorize the Android agent](#3-authorize-the-android-agent)
 - [4. Connect an AI client](#4-connect-an-ai-client)
 - [5. Tool reference](#5-tool-reference)
 - [6. OAuth 2.0 reference](#6-oauth-20-reference)
@@ -22,7 +22,7 @@ Shizuku, the MCP tool reference, the OAuth flow, and the WS relay protocol.
 ```
 ┌─────────┐  MCP run_shell    ┌──────────────────────┐   WS (outbound)   ┌──────────────┐
 │   AI    │ ──HTTPS+auth────▶ │     Go relay + MCP    │ ◀── phone dials ──│  phone APK   │
-│(Claude) │ ◀── stdout/code── │   (server/cmd/relay)  │ ── exec cmd ─────▶│ AdbShellClient│
+│(Claude) │ ◀── stdout/code── │   (server/cmd/relay)  │ ── exec cmd ─────▶│Shizuku/ADB   │
 └─────────┘                   └──────────────────────┘                   └──────────────┘
 ```
 
@@ -32,8 +32,8 @@ Shizuku, the MCP tool reference, the OAuth flow, and the WS relay protocol.
   `adb shell`. Root-only operations do not work.
 - **Output is capped at 256 KB per stream** (stdout/stderr) on the phone;
   overflow sets a `truncated` flag rather than erroring.
-- The old design's Shizuku dependency is gone: the phone pairs with its own
-  `adbd` directly (§3), not through a separately-installed app.
+- Shizuku is preferred after an explicit owner permission grant. A paired
+  on-device ADB connection is used automatically when Shizuku is unavailable.
 
 ---
 
@@ -114,17 +114,34 @@ curl -s https://mcp.example.com/healthz
 
 ---
 
-## 3. Pair the Android agent
+## 3. Authorize the Android agent
 
-No Shizuku app to install. The APK pairs directly with the phone's own
-`adbd`. See [`docs/DESIGN.md` §3.1](DESIGN.md#31-셸-접근-페어링-shizuku-대체)
-for the full rationale; this is the practical walkthrough.
+The app supports two uid-2000 shell transports. Shizuku is recommended,
+especially on Wear OS and Android versions where wireless-debugging ports
+change after reboot. ADB remains a fully supported fallback.
 
-### 3.1 Android 11+ (wireless debugging pairing)
+### 3.1 Shizuku (recommended)
+
+1. Install and start [Shizuku](https://shizuku.rikka.app/) using its normal
+   wireless-debugging, USB, or rooted-device instructions.
+2. Open rish-mcp and tap **Grant Shizuku** in the **Shell access** card.
+3. Accept Shizuku's permission prompt, fill in **Relay URL** / **Device
+   token**, then tap **Save & Start**.
+
+The foreground service binds a Shizuku UserService running as shell uid 2000.
+If Shizuku later stops, rish-mcp uses an already-paired ADB backend for new
+commands. A command that was already dispatched is never automatically
+replayed on another backend.
+
+rish-mcp deliberately rejects a Shizuku server running as root (uid 0). Start
+Shizuku in normal ADB mode; the product's security contract is shell uid 2000,
+not opportunistic root escalation.
+
+### 3.2 Android 11+ ADB fallback (wireless debugging pairing)
 
 1. On the phone: **Settings → Developer options → Wireless debugging → Pair
    device with pairing code**. Note the port and 6-digit code shown.
-2. In the rish-mcp app's **ADB shell access** card, enter that port + code,
+2. In the rish-mcp app's **Shell access** card, enter that port + code,
    tap **Pair**.
 3. Go back to the main **Wireless debugging** screen and note the port shown
    there (different from the pairing port — this one persists across
@@ -132,7 +149,7 @@ for the full rationale; this is the practical walkthrough.
 4. Fill in **Relay URL** / **Device token** in the Configuration card, tap
    **Save & Start**.
 
-### 3.2 Android 11 미만 (USB + `adb tcpip` bridge)
+### 3.3 Android 11 미만 ADB fallback (USB + `adb tcpip` bridge)
 
 Wireless pairing doesn't exist before Android 11. Instead:
 
@@ -147,19 +164,23 @@ reboot, requiring the PC+`adb tcpip` step to be repeated. This is a
 documented, accepted limitation (`docs/DESIGN.md` §7), not something the app
 works around.
 
-### 3.3 Headless provisioning
+### 3.4 Headless provisioning
 
 The `am start` extras still work, now including `adbPort`:
 
 ```bash
-adb shell am start -n kr.scin.rishmcp/.MainActivity \
+adb shell am start -n kr.scin.rishmcp/.ProvisioningActivity \
   --es relay wss://mcp.example.com/agent --es token <DEVICE_TOKEN> \
   --ei adbPort <PORT> --ez autostart true
 ```
 
-Pairing itself (entering the wireless pairing code) still needs a tap on the
-device the first time — see `docs/DESIGN.md`'s explicit non-goal: full
-headless/no-tap install is no longer a target now that Shizuku is gone.
+ADB wireless pairing still needs a tap on the device the first time. A device
+where the owner already granted rish-mcp in Shizuku can use that backend
+without configuring `adbPort`.
+
+The dedicated activity is protected by Android's privileged `DUMP` permission,
+which adb shell holds. The normal launcher activity ignores extras;
+on Android 14+ the app also checks that the launching uid is exactly 2000.
 
 ---
 
@@ -186,7 +207,8 @@ that stayed fixed across the rewrite.
 ```json
 [
   { "id": "android-1a2b3c4d", "name": "SM-S911N", "kind": "android",
-    "sdk": "36", "agentVersion": "1.0.0", "agentVersionCode": 2,
+    "sdk": "36", "agentVersion": "1.0.0", "agentVersionCode": 10000,
+    "shellBackend": "shizuku",
     "connectedForMs": 84213, "pending": 0 }
 ]
 ```
@@ -239,7 +261,7 @@ the consent page — paste `AI_TOKEN` once.
 
 ```bash
 curl -s https://dl.example.com/api/version/release
-# {"versionName":"1.0.0","versionCode":2,"tag":"agent-v1.0.0",
+# {"versionName":"1.0.0","versionCode":10000,"tag":"agent-v1.0.0",
 #  "sizeBytes":...,"sha256":"...","modifiedAt":"...","download":"/agent.apk"}
 
 curl -sO https://dl.example.com/agent.apk    # no token needed
@@ -278,7 +300,10 @@ has no route to the relay and holds no tokens or device information.
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `healthz` shows `"devices":0` | Phone agent not connected. Check the app's ADB shell status row and relay/token config. |
+| `healthz` shows `"devices":0` | Phone agent not connected. Check the app's Shell status row and relay/token config. |
+| App shows `Shizuku permission needed` | Start Shizuku, tap **Grant Shizuku**, and approve the owner permission prompt. |
+| App shows `Shizuku not running` | Start Shizuku again; the foreground service rebinds automatically. A configured ADB backend remains available as fallback. |
+| App shows `root mode rejected` | Restart Shizuku in ADB mode. rish-mcp intentionally refuses a uid-0 UserService. |
 | `run_shell` → `no device is connected to the relay` | Same as above — WS dropped, or never connected. |
 | `run_shell` → `multiple devices connected; pass deviceId` | Call `list_devices` and pass the right `deviceId`. |
 | App shows `ADB shell: pairing failed` | Wrong pairing port/code, or the pairing window expired — re-open Wireless debugging pairing and retry. |
@@ -290,7 +315,8 @@ has no route to the relay and holds no tokens or device information.
 
 ## Appendix A: WS relay protocol
 
-Unchanged from the original design (`server/internal/relay`):
+The command/result contract is unchanged; 1.0 adds a metadata-only status
+frame so `list_devices` follows backend transitions without reconnecting:
 
 ```json
 // relay → device
@@ -299,10 +325,13 @@ Unchanged from the original design (`server/internal/relay`):
 // device → relay
 { "type": "result", "reqId": "<uuid>", "code": 0,
   "stdout": "...", "stderr": "", "truncated": false, "durationMs": 127 }
+
+// device → relay when the active backend changes
+{ "type": "status", "backend": "shizuku" }
 ```
 
 Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
-`kind` (`android` or `watch`), `ver`, `vc`. Ping interval: 25s general / 60s
+`kind` (`android` or `watch`), `ver`, `vc`, `backend`. Ping interval: 25s general / 60s
 `kind=watch`; a device missing ~2.5 ping cycles is dropped.
 
 ## Appendix B: environment variables

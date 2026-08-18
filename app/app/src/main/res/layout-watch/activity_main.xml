@@ -77,7 +77,7 @@
                         android:layout_height="wrap_content"
                         android:alpha="0.7"
                         android:text=""
-                        android:textSize="10sp" />
+                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <View
@@ -116,11 +116,11 @@
                     style="@style/InfoRow"
                     android:alpha="0.6"
                     android:text=""
-                    android:textSize="10sp" />
+                    android:textSize="11sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ADB shell access card (compact): docs/DESIGN.md §3.1 -->
+        <!-- Shell access card: Shizuku preferred, ADB fallback. -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -141,9 +141,27 @@
                     android:layout_height="wrap_content"
                     android:layout_gravity="center_horizontal"
                     android:layout_marginBottom="6dp"
-                    android:text="ADB shell access"
+                    android:text="Shell access"
                     android:textSize="13sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="6dp"
+                    android:alpha="0.7"
+                    android:gravity="center"
+                    android:text="Shizuku preferred · ADB fallback"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnShizuku"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:text="Grant Shizuku"
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/pairHint"
@@ -152,7 +170,7 @@
                     android:layout_marginBottom="6dp"
                     android:alpha="0.7"
                     android:text=""
-                    android:textSize="10sp" />
+                    android:textSize="11sp" />
 
                 <LinearLayout
                     android:id="@+id/pairingSection"

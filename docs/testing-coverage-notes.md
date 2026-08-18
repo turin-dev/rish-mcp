@@ -48,7 +48,6 @@
 | `acquireAPK` | **86.7%** | 로컬 빌드 fallback + 다운로드 오류 |
 | `buildLocally` | **93.1%** | docker build 실패 / gradle 실패 / 성공 / no build output / empty outDir |
 | `ensureGoogleServicesJSON` | **100.0%** | 존재/비존재+비대화형 + 대화형 reject + empty path + copy success + copy fail |
-| `copyFile` | 100.0% | |
 | `findRepoRoot` | 90.0% | |
 
 ### 테스트 기법

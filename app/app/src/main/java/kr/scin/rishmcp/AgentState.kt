@@ -5,7 +5,8 @@ object AgentState {
     enum class Conn { IDLE, CONNECTING, CONNECTED, DISCONNECTED }
 
     @Volatile var conn: Conn = Conn.IDLE
-    @Volatile var shell: String = "?"             // "connected", "not paired", "connecting…", "connect failed"
+    @Volatile var shell: String = "?"
+    @Volatile var activeBackend: String = "none"  // "shizuku", "adb", or "none"
     @Volatile var network: String = "?"           // "wifi", "cellular", "other", "none"
     @Volatile var lastEvent: String = ""          // short human note (last error / transition)
     @Volatile var connectedSince: Long = 0L

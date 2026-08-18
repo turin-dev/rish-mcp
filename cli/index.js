@@ -13,7 +13,6 @@ import { emitKeypressEvents } from "node:readline";
 import { stdin, stdout, exit, platform } from "node:process";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, chmodSync, rmSync, readdirSync, readFileSync } from "node:fs";
-import { copyFile as fsCopyFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -289,29 +288,12 @@ function findRepoRoot() {
   }
 }
 
-async function ensureGoogleServicesJSON(appDir) {
-  const target = path.join(appDir, "app", "google-services.json");
-  if (existsSync(target)) {
-    console.log(good("google-services.json found -- FCM wake path will be built in"));
-    return;
-  }
-  console.log(dim("No app/app/google-services.json -- building without the FCM low-spec wake path."));
-  console.log(dim("(Regular devices work fine without it; this only affects Wear OS-style wake.)"));
-  if (!(await promptYesNo("Do you have your own Firebase project's google-services.json to add?", false))) return;
-  const src = await prompt("Path to it:");
-  if (!src) return;
-  await fsCopyFile(src, target);
-  console.log(good("copied -- FCM wake path will be built in"));
-}
-
 async function buildLocally() {
   if (!which("docker")) {
     throw new Error("docker not found -- install Docker Desktop, or pass --server to download a prebuilt APK instead");
   }
   const repoRoot = findRepoRoot();
   const appDir = path.join(repoRoot, "app");
-  await ensureGoogleServicesJSON(appDir);
-
   console.log(dim("docker build -t rishmcp-android-build -f Dockerfile.build " + appDir));
   const build = spawnSync("docker", ["build", "-t", "rishmcp-android-build", "-f", "Dockerfile.build", "."], {
     cwd: appDir,
@@ -512,12 +494,12 @@ async function runDeviceSetup(serverURL) {
 
   step(5, "configure the app");
   console.log(dim("These get sent to the app as launch extras, not baked into the build --"));
-  console.log(dim("see docs/USAGE.md §3.3 (headless provisioning)."));
+  console.log(dim("see docs/USAGE.md §3.4 (headless provisioning)."));
   const relayURL = await prompt("Relay URL (e.g. wss://mcp.example.com/agent):");
   const deviceToken = await prompt("Device token:");
   if (relayURL && deviceToken) {
     const amArgs = [
-      "shell", "am", "start", "-n", "kr.scin.rishmcp/.MainActivity",
+      "shell", "am", "start", "-n", "kr.scin.rishmcp/.ProvisioningActivity",
       "--es", "relay", relayURL,
       "--es", "token", deviceToken,
       "--ez", "autostart", "true",
@@ -533,11 +515,14 @@ async function runDeviceSetup(serverURL) {
     console.log(dim("skipped -- you can fill these in from the app's Configuration card instead"));
   }
 
-  step(6, "pair the app");
+  step(6, "authorize shell access");
+  console.log("Recommended: start Shizuku in ADB mode, then tap Grant Shizuku in the");
+  console.log("app's Shell access card. rish-mcp deliberately rejects root-mode Shizuku.");
+  console.log("If you prefer the built-in ADB fallback:");
   if (is11Plus) {
     console.log("On the phone: Settings → Developer options → Wireless debugging → Pair device");
-    console.log('with pairing code. Enter that port + 6-digit code in the app\'s "ADB shell');
-    console.log('access" card, tap Pair. Then note the (different) port on the main Wireless');
+    console.log('with pairing code. Enter that port + 6-digit code in the app\'s "Shell access"');
+    console.log('card, tap Pair. Then note the (different) port on the main Wireless');
     console.log('debugging screen, enter it under "Connect port", tap Save port.');
   } else {
     console.log(`The bridge port (${bridgePort}) is already listening and, if you filled in step 5,`);

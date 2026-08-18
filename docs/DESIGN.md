@@ -12,11 +12,10 @@ AI(Claude 등)가 가상머신이 아니라 사용자의 실제 Android 기기�
 개인용 도구이며, 관리자를 두는 멀티테넌트 서비스가 아니다.
 
 ```
-                 상시 WS (일반 기기)
-┌─────────┐   MCP   ┌──────────────────┐ ◀───────────────── ┌──────────────┐
-│   AI    │──HTTPS─▶│  Go relay + MCP  │                    │ Android 앱   │
-│(Claude) │ ◀───────│     서버         │──FCM 웨이크업──────▶│ (저사양 기기) │
-└─────────┘         └──────────────────┘   (Google FCM 경유) └──────────────┘
+┌─────────┐   MCP   ┌──────────────────┐ ◀── outbound WS ── ┌──────────────────┐
+│   AI    │──HTTPS─▶│  Go relay + MCP  │                    │   Android 앱     │
+│(Claude) │ ◀───────│     서버         │── exec / result ──▶│ Shizuku → ADB fb │
+└─────────┘         └──────────────────┘                    └──────────────────┘
                              │
                              │ 버전/체크섬 조회, APK 배포
                              ▼
@@ -26,8 +25,9 @@ AI(Claude 등)가 가상머신이 아니라 사용자의 실제 Android 기기�
 ```
 
 - 기기는 항상 **아웃바운드**로만 연결한다 (CGNAT 뒤에서도 동작, 인바운드 노출 없음).
-- 일반 폰/태블릿은 상시 WebSocket 연결, WearOS 등 저사양 기기는 FCM으로 깨워서
-  짧게 연결하는 하이브리드 모델을 쓴다 (§3.2).
+- 현재 모든 폼팩터가 상시 WebSocket을 사용한다. 구현되지 않은 FCM 수신 스텁과 SDK는
+  APK에서 제거했으며, 실제 relay 발신 경로와 Firebase 프로젝트가 준비되기 전에는
+  push-wake 기능이 있다고 표시하지 않는다.
 - relay는 개인이 셀프호스팅한다. 공식 서버는 버전 정보와 APK 배포만 담당하고
   relay 기능은 포함하지 않는다 (`plan.md` 비목표: multi-tenant 아님).
 
@@ -38,16 +38,15 @@ AI(Claude 등)가 가상머신이 아니라 사용자의 실제 Android 기기�
 
 | 모듈 | 상태 | 역할 |
 |---|---|---|
-| `AdbShellClient.kt` | **신규** | 온디바이스 ADB 프로토콜 클라이언트. `ShellUserService.kt`(Shizuku AIDL 바인딩)를 대체. Android 11+는 무선 디버깅 페어링, 11 미만은 USB-tcpip 브리지로 셸(uid 2000) 권한 확보 |
-| `ConnectionManager.kt` | **신규** | 기기 종류에 따라 상시 WS 유지 / FCM 웨이크업+폴백 폴링 중 라우팅 |
-| `FcmWakeReceiver.kt` | **신규** | 저사양 기기에서 FCM 푸시 수신 → 짧은 WS 세션 시작 |
-| `AgentService.kt` | 유지 | 포그라운드 서비스로 연결을 유지·감독 (역할 동일, `AdbShellClient`/`ConnectionManager` 사용하도록 내부 배선만 교체) |
+| `ShizukuShellClient.kt` / `ShellUserService.kt` | **1.0** | 명시적 권한 승인 후 Shizuku UserService를 uid 2000으로 바인딩하는 우선 백엔드 |
+| `AdbShellClient.kt` | **1.0 폴백** | 온디바이스 ADB 프로토콜 클라이언트. Android 11+ 무선 페어링, 11 미만 USB-tcpip 브리지 |
+| `ShellBackendManager.kt` | **1.0** | Shizuku 우선/ADB 폴백 선택, 중복 ADB 연결 방지, 실행 중인 명령의 백엔드 재시도 금지 |
+| `ConnectionManager.kt` | **신규** | 상시 WS, 단일 재연결 게이트, 네트워크 전환, 최대 4개 동시 명령 및 입력 제한 |
+| `AgentService.kt` | 유지 | 포그라운드 서비스로 연결과 두 셸 백엔드를 유지·감독 |
 | `BootReceiver.kt` | 유지 | 부팅 시 자동 시작 |
 | `DeviceProfile.kt` | 유지 | 기기 종류(`android`/`watch`)·SDK·앱 버전 리포팅 |
 | `Prefs.kt` | 유지 | relay URL/토큰 등 로컬 설정 저장 |
-| `MainActivity.kt` | 유지 | 프로비저닝 UI + `am start` extras(`relay`/`token`/`autostart`) 처리. 완전 무탭은 더 이상 목표가 아니므로(`plan.md` 비목표), 최초 1회 페어링 확인 화면이 추가됨 |
-
-`ShellUserService.kt`, Shizuku 관련 AIDL(`IUserService.aidl`)은 제거 대상이다.
+| `MainActivity.kt` | 유지 | Shizuku 권한 + ADB 페어링 UI, 검증된 `am start` extras(`relay`/`token`/`adbPort`/`autostart`) 처리 |
 
 ### 2.2 Go relay + MCP 서버
 
@@ -73,14 +72,21 @@ MCP Go SDK가 비공식/미성숙이므로 `internal/mcp`는 JSON-RPC 메시지�
 ---
 ## 3. 핵심 플로우
 
-### 3.1 셸 접근 페어링 (Shizuku 대체)
+### 3.1 셸 백엔드 선택
 
-**Android 11 이상**
+1. Shizuku binder가 실행 중이고 앱 권한이 승인되었으면 UserService를 바인딩해 우선 사용한다.
+   단, Shizuku server uid가 정확히 2000일 때만 허용하며 root(uid 0)는 거부한다.
+2. Shizuku가 없거나 중지/미승인 상태이면 이미 페어링된 온디바이스 ADB를 사용한다.
+3. 명령을 전달한 뒤 binder/ADB가 끊겨도 다른 백엔드에서 같은 명령을 자동 재실행하지
+   않는다. `pm`, `settings put`, 파일 쓰기 같은 비멱등 명령의 중복 실행을 막기 위해서다.
+
+**ADB: Android 11 이상**
+
 1. 사용자가 설정 > 개발자 옵션 > 무선 디버깅을 켜고 페어링 코드를 확인
 2. rish-mcp 앱에 그 코드를 1회 입력 → `AdbShellClient`가 페어링 완료
 3. 이후 앱이 자동으로 재연결·재프로비저닝 (재부팅 후에도 페어링 정보는 유지됨)
 
-**Android 11 미만**
+**ADB: Android 11 미만**
 1. 무선 페어링 API 자체가 없으므로, PC + `adb`로 최초 1회 `adb tcpip`를 실행해
    기기의 adbd를 TCP 리스닝 모드로 전환 (단순 충전 케이블 연결로는 불가)
 2. 이후 앱이 `127.0.0.1:<port>`로 자체 접속을 유지
@@ -89,11 +95,12 @@ MCP Go SDK가 비공식/미성숙이므로 `internal/mcp`는 JSON-RPC 메시지�
 
 ### 3.2 연결 모델
 
-- **일반 폰/태블릿**: 상시 WebSocket 연결 유지, ping 25초 주기 (기존과 동일)
-- **저사양 기기(WearOS 등)**: 평소엔 연결을 끊어 두고, relay가 명령을 받으면 FCM으로
-  기기를 깨움 → 기기가 짧게 WS 연결해서 명령 실행·결과 반환 후 즉시 종료
-  - FCM 전달 실패에 대비해 주기적 폴링을 폴백으로 유지 (주기는 **TBD**, 구현 시 확정)
-  - Wear OS 3+ 는 대부분 GMS를 탑재하므로 FCM 적용 가능을 전제로 함
+- 모든 기기는 foreground service에서 상시 outbound WebSocket을 유지한다.
+- 핸드헬드는 20초, watch는 60초 ping을 사용하며 heartbeat는 각각 30초/90초다.
+- epoch gate와 단일 지연 재연결 플래그가 죽은 소켓 callback, heartbeat, 네트워크 전환이
+  동시에 새 소켓을 만드는 것을 막는다.
+- 앱은 한 번에 최대 4개 명령만 실행하고, 64 KiB 명령/256자 request id/600초 timeout
+  제한을 relay와 독립적으로 다시 적용한다.
 
 ### 3.3 명령 실행 (`run_shell` / `list_devices`)
 
@@ -106,12 +113,12 @@ run_shell({ cmd: string, deviceId?: string, timeoutMs?: number })
     (isError = exit code !== 0)
 
 list_devices()
-  → [{ id, name, kind, sdk, agentVersion, agentVersionCode,
+  → [{ id, name, kind, sdk, agentVersion, agentVersionCode, shellBackend,
        connectedForMs, pending }]
 ```
 
-저사양 기기 경로에서도 응답 shape은 동일하다 — 다만 FCM 웨이크업 때문에 첫 명령의
-지연 시간이 상시 연결 기기보다 클 수 있다.
+`shellBackend`는 현재 `shizuku`, `adb`, 또는 `unknown`이며 `status` 프레임으로
+연결 중에도 갱신된다.
 
 ---
 ## 4. API/프로토콜 명세
@@ -128,12 +135,14 @@ list_devices()
 // 기기 → relay
 { "type": "result", "reqId": "<uuid>", "code": 0,
   "stdout": "...", "stderr": "", "truncated": false, "durationMs": 127 }
+
+// 활성 셸 백엔드가 바뀔 때 기기 → relay
+{ "type": "status", "backend": "shizuku" }
 ```
 
-연결 쿼리 파라미터(`token`, `deviceId`, `name`, `sdk`, `kind`, `ver`, `vc`)와 keepalive
-정책(일반 25초 / 기존 watch 60초 방식)은 일반 상시 연결 기기에 그대로 적용한다. 저사양
-기기는 FCM 웨이크업 이후 같은 프레임으로 짧은 세션만 수행하고 ping 루프 자체를 돌리지
-않는다.
+연결 쿼리 파라미터는 `token`, `deviceId`, `name`, `sdk`, `kind`, `ver`, `vc`, `backend`다.
+앱은 OkHttp `HttpUrl`로 값을 인코딩하고 기존 동명 쿼리를 교체해 토큰/기기명에 `&`, 공백
+등이 있어도 파라미터 경계가 깨지지 않게 한다.
 
 ### OAuth
 
@@ -158,15 +167,17 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 - `AI_TOKEN`은 AI 클라이언트용 마스터 키, `DEVICE_TOKEN`은 기기가 relay에 등록할 때
   쓰는 공유 비밀 — 역할과 회전 방식 모두 기존과 동일하게 유지
 - root 권한은 요구하지 않는다 (`plan.md` 비목표) — 셸 권한은 여전히 uid 2000 수준
+- root 모드 Shizuku도 사용하지 않는다. `Shizuku.getUid()`가 2000이 아니면 bind하지 않고
+  ADB 폴백으로 전환한다.
 
 ---
 ## 6. 리소스·성능 목표
 
 | 항목 | 목표 | 비고 |
 |---|---|---|
-| 저사양 기기 유휴 배터리 소모 | 시간당 2~3% 이내 | 기존 Shizuku 방식(핑 25s/60s) 대비 개선 |
-| 저사양 기기 유휴 메모리 | <50MB | |
-| 저사양 기기 유휴 CPU | 웨이크업/폴링 순간에만 짧게 사용, 그 외 0% | |
+| 저사양 기기 유휴 배터리 소모 | 실기기 측정 전 목표 미확정 | watch ping 60s / heartbeat 90s 적용 |
+| 저사양 기기 유휴 메모리 | <50MB 목표 | Firebase SDK 제거, 실기기 계측 필요 |
+| 셸 실행 동시성 | 최대 4 | 무제한 coroutine/process 생성 방지 |
 | 서버 동시 접속·명령 처리 지연 | 기존 Node/TS 대비 확실한 개선 | 정량 벤치마크는 구현 후 별도 측정 |
 
 ---
@@ -177,15 +188,11 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
   (구현 완료: `internal/mcp`, `internal/oauth`)
 - **Android 11 미만 USB 페어링**: PC + adb가 실제로 필요하고, 재부팅 후 유지 여부는
   ROM에 따라 다름 — 실기기 검증 전까지는 가정으로 취급
-- **FCM 하이브리드 연결이 통째로 보류 상태**: Firebase 프로젝트가 없어 §3.2/§8의
-  저사양 기기 웨이크업 경로를 구현할 수 없음. 재개하려면: (a) Firebase 프로젝트
-  생성, (b) `google-services.json`을 앱에 추가 + FCM SDK 의존성, (c) relay가 FCM
-  발신 크리덴셜(서비스 계정 키)로 기기를 깨우는 서버측 로직, (d)
-  `ConnectionManager`에 이미 표시해둔 자리에 `FcmWakeReceiver.kt` 구현. 그 전까지
-  모든 기기가 상시 WS를 씀
-- **Android 앱은 실기기 미검증**: `AdbShellClient`/`ConnectionManager`/
-  `MainActivity`는 컴파일·유닛 테스트(순수 로직 부분만)는 통과했지만, 실제 무선
-  페어링·연결·명령 실행은 이 개발 환경에 연결된 Android 기기가 없어 검증하지 못함
+- **Push wake 미제공**: relay sender/Firebase 프로젝트 없이 수신 클래스만 두는 것은
+  기능이 아니므로 SDK와 스텁을 제거했다. 다시 도입할 때는 등록 API, 토큰 회전/폐기,
+  발신 인증정보 보관, 전달 실패 폴백, 실제 watch 배터리 계측을 한 변경으로 구현해야 한다.
+- **Android 앱은 실기기 미검증**: Shizuku bind/권한, ADB 무선 페어링, fallback 전환,
+  실제 명령 실행은 Docker 컴파일과 순수 로직 유닛 테스트만으로 증명되지 않는다.
 - **Go 서버 배포 구성 완료**: `server/Dockerfile`로 두 바이너리 이미지 빌드,
   `docker-compose.yml`(repo 루트)로 Traefik/Dokploy 배포 구성 완료. 컨테이너는
   `read_only: true` + `tmpfs` + non-root `USER appuser`(uid 10001)로 하드닝됨
@@ -194,13 +201,12 @@ GET /agent.apk             → APK 바이너리 (무토큰, IP당 rate limit)
 ## 8. 구현 로드맵 (제안 순서)
 
 1. ✅ Go relay 골격 + MCP 툴 2개(`run_shell`, `list_devices`) + 정적 bearer 인증
-2. ✅ 앱 `AdbShellClient` (Android 11+ 무선 페어링 경로 우선) — libadb-android 기반,
-   `ConnectionManager`/`AgentService`/`MainActivity` 페어링 UI까지 배선 완료.
-   실기기 검증은 아직
+2. ✅ Shizuku 우선 + `AdbShellClient` 폴백 — 권한 UI, AIDL UserService,
+   중복 실행 없는 router, 포트/URL/명령 검증까지 배선. 실기기 검증은 아직
 3. ✅ OAuth 레이어 이식 — `internal/oauth`, `/mcp`이 정적 bearer와 OAuth access
    token을 병행 수용
-4. ⛔ 저사양 기기 하이브리드 연결(`ConnectionManager` + FCM) — **보류** (§7 참고,
-   Firebase 프로젝트 필요)
+4. ⏸ push-wake 연결 — 불완전 FCM SDK/스텁 제거. relay 발신 경로와 실기기 계측을
+   포함할 수 있을 때만 재개
 5. ✅ 공식 버전 서버 — `cmd/publicserver` (`/healthz`, `/api/version/release`,
    `/agent.apk`), GitHub 릴리즈 폴링/캐싱(`internal/release`)
 6. ✅ (코드 기준) Android 11 미만 USB 경로 — `MainActivity`/`Prefs.adbPort`가 이미

@@ -36,7 +36,7 @@ func TestRunShellRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") +
-		"/agent?token=device-token&deviceId=dev1&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
+		"/agent?token=device-token&deviceId=dev1&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=10000&backend=shizuku"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
@@ -50,6 +50,9 @@ func TestRunShellRoundTrip(t *testing.T) {
 	listResp := callTool(t, srv.URL, "ai-token", "list_devices", map[string]any{})
 	if !strings.Contains(listResp, "dev1") {
 		t.Fatalf("list_devices response missing dev1: %s", listResp)
+	}
+	if !strings.Contains(listResp, `\"shellBackend\": \"shizuku\"`) {
+		t.Fatalf("list_devices response missing shell backend: %s", listResp)
 	}
 
 	shellResp := callTool(t, srv.URL, "ai-token", "run_shell", map[string]any{"cmd": "getprop ro.product.model"})
@@ -202,7 +205,7 @@ func rawMCPRequest(t *testing.T, base, method, path, body string) *http.Response
 func beginAgent(t *testing.T, base, deviceID string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(base, "http") +
-		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=10000"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
@@ -489,7 +492,7 @@ func fakeAgentWithResult(conn *websocket.Conn, res relay.Result) {
 func beginAgentWithConfig(t *testing.T, base, deviceID string, res relay.Result) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(base, "http") +
-		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=2"
+		"/agent?token=device-token&deviceId=" + deviceID + "&name=Pixel&sdk=34&kind=android&ver=1.0.0&vc=10000"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)

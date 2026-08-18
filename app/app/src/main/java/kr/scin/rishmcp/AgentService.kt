@@ -3,20 +3,16 @@ package kr.scin.rishmcp
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 
 /**
  * Always-on foreground service. Holds the relay connection (via
- * [ConnectionManager]) and the ADB shell session (via [AdbShellClient]).
- *
- * This used to own the WebSocket and the Shizuku UserService binding
- * directly; that logic now lives in ConnectionManager/AdbShellClient, so
- * this class stays a thin lifecycle + notification shell (docs/DESIGN.md
- * §2.1: "역할 동일, AdbShellClient/ConnectionManager 사용하도록 내부 배선만
- * 교체").
+ * [ConnectionManager]) and the Shizuku/ADB shell backends.
  */
 class AgentService : Service() {
 
@@ -28,9 +24,15 @@ class AgentService : Service() {
         super.onCreate()
         AgentState.serviceRunning = true
         startForeground(NOTIF_ID, buildNotification("starting…"))
+        val adbClient = runCatching { AdbShellClient.getInstance(this) }
+            .onFailure {
+                Log.e(TAG, "ADB backend initialization failed; Shizuku remains available", it)
+                AgentState.lastEvent = "ADB unavailable: ${it.message}"
+            }
+            .getOrNull()
         connectionManager = ConnectionManager(
             context = this,
-            shellClient = AdbShellClient.getInstance(this),
+            adbShellClient = adbClient,
             onStateChanged = ::updateNotif,
         )
         connectionManager.start()
@@ -68,10 +70,18 @@ class AgentService : Service() {
         val channel = NotificationChannel(CHANNEL, "rish-mcp agent", NotificationManager.IMPORTANCE_LOW)
         channel.setShowBadge(false)
         nm.createNotificationChannel(channel)
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL)
             .setContentTitle(if (DeviceProfile.isWatch(this)) "rish-mcp watch agent" else "rish-mcp agent")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentIntent(openApp)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
     }
@@ -79,6 +89,7 @@ class AgentService : Service() {
     companion object {
         private const val CHANNEL = "rishmcp-agent"
         private const val NOTIF_ID = 42
+        private const val TAG = "rishmcp-service"
 
         fun start(ctx: Context, reconnect: Boolean = false) {
             val intent = Intent(ctx, AgentService::class.java).putExtra("reconnect", reconnect)

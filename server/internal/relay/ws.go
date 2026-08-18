@@ -175,6 +175,7 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 		agentVersion = "unknown"
 	}
 	agentVersionCode, _ := strconv.Atoi(q.Get("vc"))
+	shellBackend := normalizeShellBackend(q.Get("backend"))
 
 	// The raw values are used for routing (deviceID is the registry key), but
 	// anything that reaches a log line goes through sanitizeLogField first.
@@ -187,6 +188,7 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 		Kind:             kind,
 		AgentVersion:     agentVersion,
 		AgentVersionCode: agentVersionCode,
+		ShellBackend:     shellBackend,
 		ConnectedAt:      time.Now(),
 		lastSeen:         time.Now(),
 		conn:             conn,
@@ -270,7 +272,8 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 			log.Printf("[agent] invalid result frame from %s: %v (frame=%q)", logDeviceID, err, frame)
 			continue
 		}
-		if msg.Type == "result" && msg.ReqID != "" {
+		switch {
+		case msg.Type == "result" && msg.ReqID != "":
 			reg.resolveResult(deviceID, msg.ReqID, Result{
 				Code:       msg.Code,
 				Stdout:     msg.Stdout,
@@ -278,6 +281,10 @@ func registerAgentPing(reg *Registry, conn *websocket.Conn, q url.Values, pingEv
 				Truncated:  msg.Truncated,
 				DurationMs: msg.DurationMs,
 			})
+		case msg.Type == "status":
+			d.mu.Lock()
+			d.ShellBackend = normalizeShellBackend(msg.Backend)
+			d.mu.Unlock()
 		}
 	}
 }
@@ -290,4 +297,12 @@ type resultFrame struct {
 	Stderr     string `json:"stderr"`
 	Truncated  bool   `json:"truncated"`
 	DurationMs int64  `json:"durationMs"`
+	Backend    string `json:"backend"`
+}
+
+func normalizeShellBackend(value string) string {
+	if value == "shizuku" || value == "adb" {
+		return value
+	}
+	return "unknown"
 }
