@@ -12,14 +12,14 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /out/relay ./cmd/relay
 RUN CGO_ENABLED=0 go build -o /out/publicserver ./cmd/publicserver
 
-FROM alpine:3.20 AS relay
+FROM alpine:3.24 AS relay
 RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 appuser
 COPY --from=build /out/relay /usr/local/bin/relay
 EXPOSE 8080
 USER appuser
 ENTRYPOINT ["/usr/local/bin/relay"]
 
-FROM alpine:3.20 AS publicserver
+FROM alpine:3.24 AS publicserver
 RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 appuser
 COPY --from=build /out/publicserver /usr/local/bin/publicserver
 RUN mkdir -p /var/cache/rish-mcp && chown appuser:appuser /var/cache/rish-mcp
