@@ -4,7 +4,7 @@
 # publicserver image contains no relay code, no token-checking logic, nothing
 # that could serve /mcp or /agent even if misconfigured.
 
-FROM golang:1.23-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
