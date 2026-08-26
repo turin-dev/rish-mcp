@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "rish-mcp — your AI, with a real device",
+  title: "rish-mcp — put your phone in the loop",
   description:
-    "Connect any MCP client to the Android phone you actually use. Real hardware, shell-level access, and an outbound-only relay.",
+    "Give your AI a direct, inspectable path to the Android device you actually use.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
