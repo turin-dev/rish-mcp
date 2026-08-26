@@ -1,0 +1,141 @@
+name: Android release
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Signed rewrite APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANDROID_IMAGE: rishmcp-android-release
+      BUILD_TOOLS: /opt/android-sdk/build-tools/35.0.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate release tag and source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#agent-v}"
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::release tag must be agent-vMAJOR.MINOR.PATCH: $tag"
+            exit 1
+          fi
+          source_version="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/app/build.gradle.kts | head -n 1)"
+          if [ "$source_version" != "$version" ]; then
+            echo "::error::tag $tag does not match app versionName $source_version"
+            exit 1
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Restore and validate official signing keystore
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required repository secret: $name"
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          keytool -list \
+            -keystore app/release.keystore \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
+
+      - name: Build Android toolchain image
+        run: docker build --file app/Dockerfile.build --tag "$ANDROID_IMAGE" app
+
+      - name: Run Android tests and assemble unsigned release APK
+        run: >-
+          docker run --rm
+          --volume "${GITHUB_WORKSPACE}/app:/work"
+          --workdir /work
+          "$ANDROID_IMAGE"
+          gradle --no-daemon testDebugUnitTest assembleRelease
+
+      - name: Sign and verify release APK
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}/app:/work" \
+            --workdir /work \
+            --env ANDROID_KEYSTORE_PASSWORD \
+            --env ANDROID_KEY_ALIAS \
+            --env ANDROID_KEY_PASSWORD \
+            --env BUILD_TOOLS \
+            --env RELEASE_VERSION \
+            "$ANDROID_IMAGE" \
+            bash -euc '
+              unsigned=/work/app/build/outputs/apk/release/app-release-unsigned.apk
+              signed=/work/rish-mcp-agent-${RELEASE_VERSION}.apk
+              test -f "$unsigned"
+              "$BUILD_TOOLS/apksigner" sign \
+                --ks /work/release.keystore \
+                --ks-key-alias "$ANDROID_KEY_ALIAS" \
+                --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+                --key-pass env:ANDROID_KEY_PASSWORD \
+                --out "$signed" \
+                "$unsigned"
+              "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$signed"
+              badging="$("$BUILD_TOOLS/aapt" dump badging "$signed")"
+              printf '%s\n' "$badging" | grep -F "package: name='kr.scin.rishmcp' "
+              printf '%s\n' "$badging" | grep -F "versionName='${RELEASE_VERSION}'"
+            '
+
+      - name: Create checksum and enforce asset limit
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/rish-mcp-agent-${RELEASE_VERSION}.apk"
+          test -f "$apk"
+          sha256sum "$apk" | tee "$apk.sha256"
+          size="$(stat -c '%s' "$apk")"
+          if [ "$size" -gt 134217728 ]; then
+            echo "::error::APK exceeds the 128 MiB public-server limit: $size bytes"
+            exit 1
+          fi
+          ls -lh "$apk" "$apk.sha256"
+
+      - name: Publish signed preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "app/rish-mcp-agent-${RELEASE_VERSION}.apk#rish-mcp agent ${RELEASE_VERSION} APK" \
+            "app/rish-mcp-agent-${RELEASE_VERSION}.apk.sha256#SHA-256 checksum" \
+            --verify-tag \
+            --prerelease \
+            --title "rish-mcp agent ${RELEASE_VERSION} (preview)" \
+            --notes "Signed rewrite APK built from ${GITHUB_SHA}. This is a preview release: real-device pairing, relay/list_devices/run_shell validation, and upgrade validation remain required before stable publication."
+
+      - name: Remove signing material
+        if: ${{ always() }}
+        run: rm -f app/release.keystore
