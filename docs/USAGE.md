@@ -265,7 +265,8 @@ curl -sO https://dl.example.com/agent.apk    # no token needed
 
 It lists stable GitHub releases in the configured channel and selects the
 highest semantic version, rather than trusting GitHub creation order or the
-repository-wide `latest` release. A channel tag must be exactly
+repository-wide `latest` release. Set `RELEASE_INCLUDE_PRERELEASE=true` only
+for an explicitly configured preview deployment. A channel tag must be exactly
 `RELEASE_TAG_PREFIX` + `MAJOR.MINOR.PATCH`; the default prefix is `agent-v`, so
 a rewrite release is tagged, for example, `agent-v0.1.0`. This separate channel
 intentionally excludes historical `v0.2`–`v0.5` releases, which contain the
@@ -348,5 +349,6 @@ Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
 | `RELEASE_TAG_PREFIX` | | `agent-v` | Rewrite release channel; accepted tags are exactly `<prefix>MAJOR.MINOR.PATCH`, and the highest compatible version is selected |
 | `RELEASE_CACHE_DIR` | | `/var/cache/rish-mcp` | Where the fetched APK is cached |
 | `RELEASE_POLL_MS` | | `900000` | How often to check GitHub for a newer release |
+| `RELEASE_INCLUDE_PRERELEASE` | | `false` | Preview-only opt-in to include published GitHub prereleases; drafts remain excluded |
 | `GITHUB_API_BASE` | | `https://api.github.com` | Overridable for testing |
 | `APK_PATH` | | — | Serve this local APK (maximum 128 MiB) instead of fetching a release; disables GitHub polling |

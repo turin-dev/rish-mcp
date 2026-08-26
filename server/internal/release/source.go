@@ -82,6 +82,10 @@ type SourceOptions struct {
 	// TagPrefix is the release channel. Only GitHub releases whose tag starts
 	// with this prefix can be downloaded or restored from the cache.
 	TagPrefix string
+	// IncludePrerelease opts into serving GitHub prereleases. Keep this false
+	// for the stable channel; it exists for explicitly configured preview
+	// deployments and is never enabled by default.
+	IncludePrerelease bool
 	// LocalAPK is a dev/test escape hatch: serve this file and never call GitHub.
 	LocalAPK string
 }
@@ -94,12 +98,13 @@ func SourceOptionsFromEnv() SourceOptions {
 		}
 	}
 	return SourceOptions{
-		Repo:      envOr("GITHUB_REPO", "turin-dev/rish-mcp"),
-		CacheDir:  envOr("RELEASE_CACHE_DIR", "/var/cache/rish-mcp"),
-		APIBase:   envOr("GITHUB_API_BASE", "https://api.github.com"),
-		PollEvery: time.Duration(pollMs) * time.Millisecond,
-		TagPrefix: envOr("RELEASE_TAG_PREFIX", defaultReleaseTagPrefix),
-		LocalAPK:  os.Getenv("APK_PATH"),
+		Repo:              envOr("GITHUB_REPO", "turin-dev/rish-mcp"),
+		CacheDir:          envOr("RELEASE_CACHE_DIR", "/var/cache/rish-mcp"),
+		APIBase:           envOr("GITHUB_API_BASE", "https://api.github.com"),
+		PollEvery:         time.Duration(pollMs) * time.Millisecond,
+		TagPrefix:         envOr("RELEASE_TAG_PREFIX", defaultReleaseTagPrefix),
+		IncludePrerelease: envBool("RELEASE_INCLUDE_PRERELEASE"),
+		LocalAPK:          os.Getenv("APK_PATH"),
 	}
 }
 
@@ -108,6 +113,11 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(key string) bool {
+	v, err := strconv.ParseBool(os.Getenv(key))
+	return err == nil && v
 }
 
 // Source polls GitHub for the highest published release in its configured tag
@@ -191,9 +201,10 @@ func (s *Source) loadCache() {
 }
 
 type cacheMetadata struct {
-	Tag       string `json:"tag"`
-	APK       string `json:"apk,omitempty"`
-	FetchedAt string `json:"fetchedAt,omitempty"`
+	Tag        string `json:"tag"`
+	APK        string `json:"apk,omitempty"`
+	Prerelease bool   `json:"prerelease,omitempty"`
+	FetchedAt  string `json:"fetchedAt,omitempty"`
 }
 
 func (s *Source) readCachedRelease() (*Release, error) {
@@ -210,6 +221,9 @@ func (s *Source) readCachedRelease() (*Release, error) {
 	}
 	if _, ok := parseReleaseVersion(meta.Tag, s.opts.TagPrefix); !ok {
 		return nil, fmt.Errorf("cached release tag %q is not a valid %sMAJOR.MINOR.PATCH tag", meta.Tag, s.opts.TagPrefix)
+	}
+	if meta.Prerelease && !s.opts.IncludePrerelease {
+		return nil, fmt.Errorf("cached release %q is a prerelease but RELEASE_INCLUDE_PRERELEASE is disabled", meta.Tag)
 	}
 	apkName := meta.APK
 	if apkName == "" {
@@ -249,9 +263,10 @@ func (s *Source) isCompatibleTag(tag string) bool {
 	return strings.HasPrefix(tag, s.opts.TagPrefix) && len(tag) > len(s.opts.TagPrefix)
 }
 
-// refresh checks GitHub for the highest stable release in the configured tag
-// channel and downloads it. Errors are swallowed: a failed refresh just means
-// "keep serving whatever compatible release we already have".
+// refresh checks GitHub for the highest release in the configured tag channel
+// and downloads it. Prereleases are considered only when explicitly enabled.
+// Errors are swallowed: a failed refresh just means "keep serving whatever
+// compatible release we already have".
 func (s *Source) refresh(ctx context.Context) {
 	releases, err := s.fetchReleases(ctx)
 	if err != nil {
@@ -259,20 +274,22 @@ func (s *Source) refresh(ctx context.Context) {
 		return
 	}
 
-	// GitHub returns releases newest-first. Ignore drafts and prereleases to
-	// preserve the old implicit-latest endpoint's stable-channel behaviour,
-	// then choose the highest compatible semantic version that has an APK.
+	// GitHub returns releases newest-first. Ignore drafts and, unless the
+	// preview flag is enabled, prereleases to preserve the stable-channel
+	// behaviour. Then choose the highest compatible semantic version that has
+	// an APK.
 	// Selecting by tag version, rather than API creation order, prevents a
 	// later-created lower tag from downgrading the published agent.
 	var (
-		selectedTag     string
-		selectedVersion releaseVersion
-		assetURL        string
-		assetName       string
-		haveSelection   bool
+		selectedTag        string
+		selectedVersion    releaseVersion
+		assetURL           string
+		assetName          string
+		selectedPrerelease bool
+		haveSelection      bool
 	)
 	for _, candidate := range releases {
-		if candidate.Draft || candidate.Prerelease || !s.isCompatibleTag(candidate.TagName) {
+		if candidate.Draft || (!s.opts.IncludePrerelease && candidate.Prerelease) || !s.isCompatibleTag(candidate.TagName) {
 			continue
 		}
 		candidateVersion, ok := parseReleaseVersion(candidate.TagName, s.opts.TagPrefix)
@@ -295,11 +312,16 @@ func (s *Source) refresh(ctx context.Context) {
 			selectedVersion = candidateVersion
 			assetURL = candidateAssetURL
 			assetName = candidateAssetName
+			selectedPrerelease = candidate.Prerelease
 			haveSelection = true
 		}
 	}
 	if !haveSelection {
-		s.warnFailed(fmt.Errorf("no stable release with tag prefix %q and a .apk asset", s.opts.TagPrefix))
+		releaseKind := "stable"
+		if s.opts.IncludePrerelease {
+			releaseKind = "stable or prerelease"
+		}
+		s.warnFailed(fmt.Errorf("no %s release with tag prefix %q and a .apk asset", releaseKind, s.opts.TagPrefix))
 		return
 	}
 
@@ -318,7 +340,7 @@ func (s *Source) refresh(ctx context.Context) {
 	}
 
 	log.Printf("[release] fetching %s from %s", assetName, selectedTag)
-	if err := s.downloadAndPublish(ctx, assetURL, selectedTag); err != nil {
+	if err := s.downloadAndPublish(ctx, assetURL, selectedTag, selectedPrerelease); err != nil {
 		s.warnFailed(err)
 	}
 }
@@ -371,7 +393,7 @@ func (s *Source) fetchJSON(ctx context.Context, url string, timeout time.Duratio
 	return body, nil
 }
 
-func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string) error {
+func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string, prerelease bool) error {
 	version, ok := parseReleaseVersion(tag, s.opts.TagPrefix)
 	if !ok {
 		return fmt.Errorf("release tag %q is not a valid %sMAJOR.MINOR.PATCH tag", tag, s.opts.TagPrefix)
@@ -444,9 +466,10 @@ func (s *Source) downloadAndPublish(ctx context.Context, assetURL, tag string) e
 	apkName := immutableAPKName(info)
 	apkPath := filepath.Join(s.opts.CacheDir, apkName)
 	metaBytes, err := json.Marshal(cacheMetadata{
-		Tag:       tag,
-		APK:       apkName,
-		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+		Tag:        tag,
+		APK:        apkName,
+		Prerelease: prerelease,
+		FetchedAt:  time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return fmt.Errorf("encode release metadata: %w", err)

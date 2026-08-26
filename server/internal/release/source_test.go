@@ -352,6 +352,70 @@ func TestSourceSelectsHighestStableReleaseInTagChannel(t *testing.T) {
 	}
 }
 
+func TestSourceIncludesPrereleaseOnlyWhenConfigured(t *testing.T) {
+	previewAPK := buildTestApkBytes(t, 2, "0.2.0")
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"tag_name":   "agent-v0.2.0",
+			"prerelease": true,
+			"assets": []map[string]string{{
+				"name":                 "preview.apk",
+				"browser_download_url": srv.URL + "/download/preview.apk",
+			}},
+		}})
+	})
+	mux.HandleFunc("/download/preview.apk", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(previewAPK)
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	cacheDir := t.TempDir()
+	stable := NewSource(SourceOptions{
+		Repo:      "test/repo",
+		CacheDir:  cacheDir,
+		APIBase:   srv.URL,
+		PollEvery: time.Hour,
+	})
+	stable.refresh(context.Background())
+	if rel := stable.Get(); rel != nil {
+		t.Fatalf("stable channel served prerelease without opt-in: %+v", rel)
+	}
+
+	preview := NewSource(SourceOptions{
+		Repo:              "test/repo",
+		CacheDir:          cacheDir,
+		APIBase:           srv.URL,
+		PollEvery:         time.Hour,
+		IncludePrerelease: true,
+	})
+	preview.refresh(context.Background())
+	rel := preview.Get()
+	if rel == nil || rel.Tag != "agent-v0.2.0" || rel.VersionName != "0.2.0" {
+		t.Fatalf("preview channel release = %+v, want agent-v0.2.0", rel)
+	}
+
+	metaBytes, err := os.ReadFile(filepath.Join(cacheDir, "release.json"))
+	if err != nil {
+		t.Fatalf("read preview metadata: %v", err)
+	}
+	var meta cacheMetadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("decode preview metadata: %v", err)
+	}
+	if !meta.Prerelease {
+		t.Fatal("preview metadata did not record prerelease state")
+	}
+
+	stableCache := NewSource(SourceOptions{CacheDir: cacheDir})
+	stableCache.loadCache()
+	if rel := stableCache.Get(); rel != nil {
+		t.Fatalf("stable channel restored a prerelease cache: %+v", rel)
+	}
+}
+
 func TestSourceScansLaterReleasePagesBeforeSelectingHighest(t *testing.T) {
 	var (
 		srv          *httptest.Server
@@ -616,7 +680,7 @@ func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
 			t.Fatal("expected no tmp file before download")
 		}
 
-		err := s.downloadAndPublish(ctx, srv.URL+"/bad.apk", "agent-v1.0.0")
+		err := s.downloadAndPublish(ctx, srv.URL+"/bad.apk", "agent-v1.0.0", false)
 		if err == nil {
 			t.Fatal("expected downloadAndPublish to fail with bad APK bytes")
 		}
@@ -642,7 +706,7 @@ func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if err := s.downloadAndPublish(ctx, srv.URL+"/v1.apk", "agent-v1.0.0"); err != nil {
+		if err := s.downloadAndPublish(ctx, srv.URL+"/v1.apk", "agent-v1.0.0", false); err != nil {
 			t.Fatalf("publish last-good release: %v", err)
 		}
 		good := s.Get()
@@ -652,7 +716,7 @@ func TestDownloadAndPublishCleansUpTmpOnFailure(t *testing.T) {
 		}
 
 		tmpPath := filepath.Join(dir, "agent.apk.tmp")
-		err := s.downloadAndPublish(ctx, srv.URL+"/v2.apk", "agent-v2.0.0")
+		err := s.downloadAndPublish(ctx, srv.URL+"/v2.apk", "agent-v2.0.0", false)
 		if err == nil {
 			t.Fatal("expected stale backup to block the cache swap")
 		}
@@ -737,7 +801,7 @@ func TestDownloadAndPublishMetadataWriteFailurePreservesLastGood(t *testing.T) {
 	}))
 	defer v2Server.Close()
 
-	err = src.downloadAndPublish(context.Background(), v2Server.URL+"/agent.apk", "agent-v2.0.0")
+	err = src.downloadAndPublish(context.Background(), v2Server.URL+"/agent.apk", "agent-v2.0.0", false)
 	if err == nil || !strings.Contains(err.Error(), "write release metadata") {
 		t.Fatalf("expected metadata write error, got %v", err)
 	}
@@ -967,6 +1031,7 @@ func TestParseReleaseVersion(t *testing.T) {
 
 func TestSourceOptionsFromEnvDefaults(t *testing.T) {
 	t.Setenv("RELEASE_TAG_PREFIX", "")
+	t.Setenv("RELEASE_INCLUDE_PRERELEASE", "")
 	opts := SourceOptionsFromEnv()
 	if opts.Repo != "turin-dev/rish-mcp" {
 		t.Errorf("Repo = %q, want turin-dev/rish-mcp", opts.Repo)
@@ -983,6 +1048,9 @@ func TestSourceOptionsFromEnvDefaults(t *testing.T) {
 	if opts.TagPrefix != "agent-v" {
 		t.Errorf("TagPrefix = %q, want agent-v", opts.TagPrefix)
 	}
+	if opts.IncludePrerelease {
+		t.Error("IncludePrerelease = true, want false")
+	}
 	if opts.LocalAPK != "" {
 		t.Errorf("LocalAPK = %q, want empty", opts.LocalAPK)
 	}
@@ -994,6 +1062,7 @@ func TestSourceOptionsFromEnvCustomValues(t *testing.T) {
 	t.Setenv("GITHUB_API_BASE", "https://my-gh-api.example.com")
 	t.Setenv("RELEASE_POLL_MS", "5000")
 	t.Setenv("RELEASE_TAG_PREFIX", "android-v")
+	t.Setenv("RELEASE_INCLUDE_PRERELEASE", "true")
 	t.Setenv("APK_PATH", "/tmp/test.apk")
 
 	opts := SourceOptionsFromEnv()
@@ -1012,8 +1081,22 @@ func TestSourceOptionsFromEnvCustomValues(t *testing.T) {
 	if opts.TagPrefix != "android-v" {
 		t.Errorf("TagPrefix = %q", opts.TagPrefix)
 	}
+	if !opts.IncludePrerelease {
+		t.Error("IncludePrerelease = false, want true")
+	}
 	if opts.LocalAPK != "/tmp/test.apk" {
 		t.Errorf("LocalAPK = %q", opts.LocalAPK)
+	}
+}
+
+func TestSourceOptionsFromEnvInvalidPrereleaseFlag(t *testing.T) {
+	for _, value := range []string{"not-a-bool", "false", "0"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("RELEASE_INCLUDE_PRERELEASE", value)
+			if opts := SourceOptionsFromEnv(); opts.IncludePrerelease {
+				t.Errorf("IncludePrerelease = true for %q, want false", value)
+			}
+		})
 	}
 }
 
@@ -1436,7 +1519,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{CacheDir: t.TempDir()})
-		err := src.downloadAndPublish(context.Background(), srv.URL+"/legacy.apk", "v0.5.0")
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/legacy.apk", "v0.5.0", false)
 		if err == nil || !strings.Contains(err.Error(), "is not a valid agent-vMAJOR.MINOR.PATCH tag") {
 			t.Fatalf("expected release-channel error, got %v", err)
 		}
@@ -1447,14 +1530,14 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 
 	t.Run("bad url", func(t *testing.T) {
 		src := NewSource(SourceOptions{})
-		if err := src.downloadAndPublish(context.Background(), "://bad", "agent-v1.0.0"); err == nil {
+		if err := src.downloadAndPublish(context.Background(), "://bad", "agent-v1.0.0", false); err == nil {
 			t.Fatal("expected error for malformed URL")
 		}
 	})
 
 	t.Run("connection refused", func(t *testing.T) {
 		src := NewSource(SourceOptions{})
-		if err := src.downloadAndPublish(context.Background(), "http://127.0.0.1:1/agent.apk", "agent-v1.0.0"); err == nil {
+		if err := src.downloadAndPublish(context.Background(), "http://127.0.0.1:1/agent.apk", "agent-v1.0.0", false); err == nil {
 			t.Fatal("expected error when connection is refused")
 		}
 	})
@@ -1466,7 +1549,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{})
-		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0")
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0", false)
 		if err == nil {
 			t.Fatal("expected error for non-200 download")
 		}
@@ -1482,7 +1565,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{CacheDir: t.TempDir()})
-		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0")
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0", false)
 		if err == nil || !strings.Contains(err.Error(), "too large") {
 			t.Fatalf("expected oversized download rejection, got %v", err)
 		}
@@ -1496,7 +1579,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{})
-		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0")
+		err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0", false)
 		if err == nil {
 			t.Fatal("expected error when body is truncated")
 		}
@@ -1513,7 +1596,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{CacheDir: blocker})
-		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0"); err == nil {
+		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0", false); err == nil {
 			t.Fatal("expected error when the cache dir cannot be created")
 		}
 	})
@@ -1529,7 +1612,7 @@ func TestDownloadAndPublishErrors(t *testing.T) {
 		defer srv.Close()
 
 		src := NewSource(SourceOptions{CacheDir: cacheDir})
-		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0"); err == nil {
+		if err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v1.0.0", false); err == nil {
 			t.Fatal("expected error when the tmp path is an existing directory")
 		}
 	})
@@ -1544,7 +1627,7 @@ func TestDownloadAndPublishVersionMismatch(t *testing.T) {
 
 	cacheDir := t.TempDir()
 	src := NewSource(SourceOptions{CacheDir: cacheDir})
-	err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v2.0.0")
+	err := src.downloadAndPublish(context.Background(), srv.URL+"/agent.apk", "agent-v2.0.0", false)
 	if err == nil {
 		t.Fatal("expected tag/APK version mismatch to be rejected")
 	}
