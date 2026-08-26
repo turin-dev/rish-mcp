@@ -52,10 +52,10 @@ Shell access lives entirely on the private host. The public one only answers
 
 ## Components
 
-- `server/` — Node/TS. Streamable-HTTP **MCP server** (`run_shell`, `list_devices`)
+- `server` — Node/TS. Streamable-HTTP **MCP server** (`run_shell`, `list_devices`)
   + **WS relay** the Android device connects to. Bearer auth for AIs, shared token
   for the device. A second entrypoint (`dist/public.js`) serves the public host.
-- `app/` — Android (Kotlin). One installable **APK**: binds a Shizuku `UserService`
+- `app` — Android (Kotlin). One installable **APK**: binds a Shizuku `UserService`
   to run commands as shell uid, a foreground service holds the outbound WS, auto-starts on boot.
 
 ## Build

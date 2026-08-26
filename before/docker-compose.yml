@@ -12,7 +12,7 @@
 services:
   rish-mcp:
     build:
-      context: ./server
+      context: server
     restart: unless-stopped
     environment:
       PORT: "8080"
@@ -38,7 +38,7 @@ services:
   # container has no AI_TOKEN/DEVICE_TOKEN and nothing to leak if it is abused.
   rish-mcp-public:
     build:
-      context: ./server
+      context: server
     command: ["node", "dist/public.js"]
     restart: unless-stopped
     environment:

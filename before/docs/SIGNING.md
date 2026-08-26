@@ -71,7 +71,7 @@ can never advertise a version its binary does not carry.
 1. Server TypeScript build and end-to-end MCP smoke test run.
 2. The keystore is restored from GitHub Secrets.
 3. The workflow verifies that the configured alias/password can open the key.
-4. `app/build-apk.sh` creates the release APK using that key.
+4. `../app/build-apk.sh` creates the release APK using that key.
 5. Android `apksigner` verifies the generated APK and prints its certificate information.
 6. A SHA-256 checksum is generated.
 7. GitHub Actions uploads an artifact named `rish-mcp-official-<commit-sha>` containing:
