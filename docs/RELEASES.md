@@ -6,9 +6,9 @@ not share an implicit "latest APK" channel.
 ## Legacy releases
 
 GitHub tags `v0.2.0`, `v0.3.0`, and `v0.5.0` contain the previous
-Shizuku-based Android agent and Node/TypeScript server. They are retained for
+legacy Android agent and Node/TypeScript server. They are retained for
 existing users and historical reference, but they are not compatible release
-artifacts for the current no-Shizuku rewrite.
+artifacts for the current Go rewrite and its isolated `agent-v` channel.
 
 ## Rewrite agent releases
 
@@ -46,7 +46,11 @@ The npm package `rish-mcp-setup` has its own independent semantic version. A
 CLI package version is not an Android agent version and must not be used to
 select an APK.
 
-No signed rewrite APK has been published yet.
+The current rewrite source identifies itself as `1.0.0`: the Android agent uses
+`versionName 1.0.0` with monotonic `versionCode 10000`, the MCP server reports
+`1.0.0`, and the npm setup CLI package is `1.0.0`. This source-version bump does
+not publish an artifact. No signed rewrite APK has been published yet, and the
+`agent-v1.0.0` tag remains reserved until every publication gate below passes.
 
 ## Publication gates
 
@@ -57,6 +61,8 @@ An `agent-vX.Y.Z` release is ready only after all of the following are recorded:
 3. The APK is signed with the official key and its signature is verified.
 4. The tag suffix and APK `versionName` agree, and the APK `versionCode` is
    strictly greater than the most recently published rewrite agent.
+   Source releases use `MAJOR*10000 + MINOR*100 + PATCH`; 1.0.0 is therefore
+   10000, safely above the legacy v0.5.0 package's code 5.
 5. The `.apk` asset is no larger than 128 MiB, and its filename, SHA-256
    checksum, and release metadata agree.
 6. Pairing, relay connection, `list_devices`, and `run_shell` are exercised on

@@ -192,6 +192,9 @@ func TestRegisterAgentDefaults(t *testing.T) {
 	if d.AgentVersionCode != 0 {
 		t.Fatalf("expected agent version code 0, got %d", d.AgentVersionCode)
 	}
+	if d.ShellBackend != "unknown" {
+		t.Fatalf("expected shell backend 'unknown', got %q", d.ShellBackend)
+	}
 
 	_ = client
 	_ = server.Close()
@@ -459,6 +462,7 @@ func TestRegisterAgentCustomValues(t *testing.T) {
 		"name":     {"Pixel-9"},
 		"sdk":      {"35"},
 		"kind":     {"watch"},
+		"backend":  {"shizuku"},
 		"ver":      {"2.1.0"},
 		"vc":       {"42"},
 	}
@@ -489,6 +493,25 @@ func TestRegisterAgentCustomValues(t *testing.T) {
 	if d.AgentVersionCode != 42 {
 		t.Fatalf("expected agent version code 42, got %d", d.AgentVersionCode)
 	}
+	if d.ShellBackend != "shizuku" {
+		t.Fatalf("expected shell backend 'shizuku', got %q", d.ShellBackend)
+	}
+	if err := client.WriteJSON(map[string]string{"type": "status", "backend": "adb"}); err != nil {
+		t.Fatalf("write backend status: %v", err)
+	}
+	waitForRelayCondition(t, "live shell backend update", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.ShellBackend == "adb"
+	})
+	if err := client.WriteJSON(map[string]string{"type": "status", "backend": "root"}); err != nil {
+		t.Fatalf("write invalid backend status: %v", err)
+	}
+	waitForRelayCondition(t, "invalid shell backend normalization", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.ShellBackend == "unknown"
+	})
 
 	_ = client.Close()
 }

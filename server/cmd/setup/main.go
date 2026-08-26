@@ -5,7 +5,8 @@
 // One thing this tool deliberately does NOT do: drive the Android 11+
 // wireless-pairing handshake itself. That handshake happens on-device,
 // inside the app (AdbShellClient / libadb-android) -- that's the entire
-// point of the app not needing Shizuku or a PC in the loop. A PC's adb is
+// point of the app keeping an ADB fallback without a PC in the loop. Shizuku
+// is also supported and preferred when the owner grants it. A PC's adb is
 // only load-bearing for two things: installing the APK, and the
 // pre-Android-11 `adb tcpip` USB bridge (wireless pairing doesn't exist
 // before Android 11). This tool covers exactly those two things, then
@@ -279,12 +280,12 @@ func runDeviceSetup(serverURL string) error {
 
 	step(5, "configure the app")
 	fmt.Println(dim("These get sent to the app as launch extras, not baked into the build --"))
-	fmt.Println(dim("see docs/USAGE.md §3.3 (headless provisioning)."))
+	fmt.Println(dim("see docs/USAGE.md §3.4 (headless provisioning)."))
 	relayURL := prompt("Relay URL (e.g. wss://mcp.example.com/agent):")
 	deviceToken := prompt("Device token:")
 	if relayURL != "" && deviceToken != "" {
 		args := []string{
-			"shell", "am", "start", "-n", "kr.scin.rishmcp/.MainActivity",
+			"shell", "am", "start", "-n", "kr.scin.rishmcp/.ProvisioningActivity",
 			"--es", "relay", relayURL,
 			"--es", "token", deviceToken,
 			"--ez", "autostart", "true",
@@ -302,11 +303,14 @@ func runDeviceSetup(serverURL string) error {
 		fmt.Println(dim("skipped -- you can fill these in from the app's Configuration card instead"))
 	}
 
-	step(6, "pair the app")
+	step(6, "authorize shell access")
+	fmt.Println("Recommended: start Shizuku in ADB mode, then tap Grant Shizuku in the")
+	fmt.Println("app's Shell access card. rish-mcp deliberately rejects root-mode Shizuku.")
+	fmt.Println("If you prefer the built-in ADB fallback:")
 	if is11Plus {
 		fmt.Println("On the phone: Settings → Developer options → Wireless debugging → Pair device")
-		fmt.Println("with pairing code. Enter that port + 6-digit code in the app's \"ADB shell")
-		fmt.Println("access\" card, tap Pair. Then note the (different) port on the main Wireless")
+		fmt.Println("with pairing code. Enter that port + 6-digit code in the app's \"Shell access\"")
+		fmt.Println("card, tap Pair. Then note the (different) port on the main Wireless")
 		fmt.Println("debugging screen, enter it under \"Connect port\", tap Save port.")
 	} else {
 		fmt.Println(fmt.Sprintf("The bridge port (%s) is already listening and, if you filled in step 5,", bridgePort))
@@ -628,9 +632,6 @@ func buildLocally() (string, error) {
 		return "", err
 	}
 	appDir := filepath.Join(repoRoot, "app")
-	if err := ensureGoogleServicesJSON(appDir); err != nil {
-		return "", err
-	}
 	fmt.Println(dim("docker build -t rishmcp-android-build -f Dockerfile.build " + appDir))
 	build := exec.Command("docker", "build", "-t", "rishmcp-android-build", "-f", "Dockerfile.build", ".")
 	build.Dir = appDir
@@ -661,50 +662,6 @@ func buildLocally() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no .apk found in %s", outDir)
-}
-
-// ensureGoogleServicesJSON checks for app/app/google-services.json, the
-// file that turns on the FCM low-spec wake path (build.gradle.kts only
-// applies the Firebase Gradle plugin when it's present -- otherwise the
-// build still succeeds, just without that feature). It's real per-project
-// Firebase config, gitignored on purpose (docs/DESIGN.md §7), so each
-// local build has to supply its own rather than finding one in the repo.
-func ensureGoogleServicesJSON(appDir string) error {
-	target := filepath.Join(appDir, "app", "google-services.json")
-	if _, err := os.Stat(target); err == nil {
-		fmt.Println(good("google-services.json found -- FCM wake path will be built in"))
-		return nil
-	}
-
-	fmt.Println(dim("No app/app/google-services.json -- building without the FCM low-spec wake path."))
-	fmt.Println(dim("(Regular devices work fine without it; this only affects Wear OS-style wake.)"))
-	if !promptYesNo("Do you have your own Firebase project's google-services.json to add?", false) {
-		return nil
-	}
-	src := prompt("Path to it:")
-	if src == "" {
-		return nil
-	}
-	if err := copyFile(src, target); err != nil {
-		return fmt.Errorf("couldn't copy google-services.json: %w", err)
-	}
-	fmt.Println(good("copied -- FCM wake path will be built in"))
-	return nil
-}
-
-func copyFile(src, dest string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
 }
 
 func findRepoRoot() (string, error) {

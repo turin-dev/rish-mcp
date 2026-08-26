@@ -33,16 +33,17 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.SecureRandom
+import java.security.interfaces.RSAPrivateCrtKey
+import java.security.interfaces.RSAPublicKey
 import java.security.cert.Certificate
 import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
-import java.util.Random
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * On-device ADB shell client: replaces the old Shizuku UserService binding
- * (before/app's ShellUserService.kt + IUserService.aidl). Wraps
+ * On-device ADB shell client used when Shizuku is unavailable. Wraps
  * libadb-android for wireless-debugging pairing and the standard ADB
  * connect/auth handshake, and layers [ShellV2Protocol] on top of its raw
  * stream API to get separated stdout/stderr and an exit code, which
@@ -60,7 +61,7 @@ class AdbShellClient private constructor(context: Context) : AbsAdbConnectionMan
         setApi(Build.VERSION.SDK_INT)
         val existingKey = readPrivateKeyFromFile(context)
         val existingCert = readCertificateFromFile(context)
-        if (existingKey != null && existingCert != null) {
+        if (existingKey != null && existingCert != null && keyMatches(existingKey, existingCert)) {
             privateKey = existingKey
             certificate = existingCert
         } else {
@@ -146,23 +147,27 @@ class AdbShellClient private constructor(context: Context) : AbsAdbConnectionMan
         // --- key/cert file persistence (ported from libadb-android's sample
         // AdbConnectionManager.java; see docs/DESIGN.md §3.1) ---
 
-        private fun readPrivateKeyFromFile(context: Context): PrivateKey? {
+        private fun readPrivateKeyFromFile(context: Context): PrivateKey? = runCatching {
             val file = File(context.filesDir, "adb_private.key")
-            if (!file.exists()) return null
+            if (!file.exists()) return@runCatching null
             val bytes = file.readBytes()
             val keyFactory = KeyFactory.getInstance("RSA")
-            return keyFactory.generatePrivate(PKCS8EncodedKeySpec(bytes))
-        }
+            keyFactory.generatePrivate(PKCS8EncodedKeySpec(bytes))
+        }.getOrNull()
 
         private fun writePrivateKeyToFile(context: Context, key: PrivateKey) {
             File(context.filesDir, "adb_private.key").writeBytes(key.encoded)
         }
 
-        private fun readCertificateFromFile(context: Context): Certificate? {
+        private fun readCertificateFromFile(context: Context): Certificate? = runCatching {
             val file = File(context.filesDir, "adb_cert.pem")
-            if (!file.exists()) return null
-            return FileInputStream(file).use { CertificateFactory.getInstance("X.509").generateCertificate(it) }
-        }
+            if (!file.exists()) return@runCatching null
+            val certificate = FileInputStream(file).use {
+                CertificateFactory.getInstance("X.509").generateCertificate(it)
+            }
+            (certificate as? X509Certificate)?.checkValidity()
+            certificate
+        }.getOrNull()
 
         private fun writeCertificateToFile(context: Context, certificate: Certificate) {
             val file = File(context.filesDir, "adb_cert.pem")
@@ -176,16 +181,23 @@ class AdbShellClient private constructor(context: Context) : AbsAdbConnectionMan
             }
         }
 
+        private fun keyMatches(key: PrivateKey, certificate: Certificate): Boolean {
+            val privateRsa = key as? RSAPrivateCrtKey ?: return false
+            val publicRsa = certificate.publicKey as? RSAPublicKey ?: return false
+            return privateRsa.modulus == publicRsa.modulus &&
+                privateRsa.publicExponent == publicRsa.publicExponent
+        }
+
         private fun generateKeyAndCert(): Pair<PrivateKey, Certificate> {
             val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
-            keyPairGenerator.initialize(2048, SecureRandom.getInstance("SHA1PRNG"))
+            keyPairGenerator.initialize(2048, SecureRandom())
             val keyPair = keyPairGenerator.generateKeyPair()
             val publicKey = keyPair.public
             val privateKey = keyPair.private
 
             val algorithmName = "SHA512withRSA"
             val notBefore = Date()
-            val notAfter = Date(System.currentTimeMillis() + 24 * 60 * 60 * 1000L)
+            val notAfter = Date(System.currentTimeMillis() + CERT_VALIDITY_MS)
             val x500Name = X500Name("CN=rish-mcp")
 
             val extensions = CertificateExtensions()
@@ -197,7 +209,7 @@ class AdbShellClient private constructor(context: Context) : AbsAdbConnectionMan
 
             val certInfo = X509CertInfo()
             certInfo.set("version", CertificateVersion(2))
-            certInfo.set("serialNumber", CertificateSerialNumber(Random().nextInt() and Int.MAX_VALUE))
+            certInfo.set("serialNumber", CertificateSerialNumber(SecureRandom().nextInt() and Int.MAX_VALUE))
             certInfo.set("algorithmID", CertificateAlgorithmId(AlgorithmId.get(algorithmName)))
             certInfo.set("subject", CertificateSubjectName(x500Name))
             certInfo.set("key", CertificateX509Key(publicKey))
@@ -209,6 +221,8 @@ class AdbShellClient private constructor(context: Context) : AbsAdbConnectionMan
             certImpl.sign(privateKey, algorithmName)
             return privateKey to certImpl
         }
+
+        private const val CERT_VALIDITY_MS = 10L * 365 * 24 * 60 * 60 * 1000
     }
 }
 
@@ -219,4 +233,14 @@ data class ShellResult(
     val stderr: String,
     val truncated: Boolean,
     val durationMs: Long,
-)
+) {
+    companion object {
+        fun unavailable(detail: String) = ShellResult(
+            code = -1,
+            stdout = "",
+            stderr = detail,
+            truncated = false,
+            durationMs = 0,
+        )
+    }
+}

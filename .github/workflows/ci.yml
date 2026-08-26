@@ -181,13 +181,13 @@ jobs:
       - name: Build Android toolchain image
         run: docker build --file app/Dockerfile.build --tag rish-mcp-android-ci app
 
-      - name: Unit test and assemble debug APK
+      - name: Lint, unit test, and assemble debug APK
         run: >-
           docker run --rm
           --volume "${GITHUB_WORKSPACE}/app:/work"
           --workdir /work
           rish-mcp-android-ci
-          gradle --no-daemon testDebugUnitTest assembleDebug
+          gradle --no-daemon lintDebug testDebugUnitTest assembleDebug
 
       - name: Verify APK output
         run: test -f app/app/build/outputs/apk/debug/app-debug.apk

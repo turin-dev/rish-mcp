@@ -67,6 +67,7 @@ type Device struct {
 	Kind             Kind
 	AgentVersion     string
 	AgentVersionCode int
+	ShellBackend     string
 	ConnectedAt      time.Time
 
 	mu       sync.Mutex
@@ -89,6 +90,7 @@ type DeviceInfo struct {
 	SDK              string `json:"sdk"`
 	AgentVersion     string `json:"agentVersion"`
 	AgentVersionCode int    `json:"agentVersionCode"`
+	ShellBackend     string `json:"shellBackend"`
 	ConnectedForMs   int64  `json:"connectedForMs"`
 	Pending          int    `json:"pending"`
 }
@@ -137,6 +139,7 @@ func (r *Registry) List() []DeviceInfo {
 	for _, d := range r.devices {
 		d.mu.Lock()
 		pending := len(d.pending)
+		shellBackend := d.ShellBackend
 		d.mu.Unlock()
 		out = append(out, DeviceInfo{
 			ID:               d.ID,
@@ -145,6 +148,7 @@ func (r *Registry) List() []DeviceInfo {
 			SDK:              d.SDK,
 			AgentVersion:     d.AgentVersion,
 			AgentVersionCode: d.AgentVersionCode,
+			ShellBackend:     shellBackend,
 			ConnectedForMs:   now.Sub(d.ConnectedAt).Milliseconds(),
 			Pending:          pending,
 		})

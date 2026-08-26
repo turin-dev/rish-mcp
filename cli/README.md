@@ -10,7 +10,7 @@ npx rish-mcp-setup --server=
 
 The empty `--server=` value forces a local APK build. This is currently
 required because GitHub releases through `v0.5.0` contain the legacy
-Shizuku-based application, not the no-Shizuku rewrite. No global install, Go
+legacy application, not the Go rewrite's isolated `agent-v` channel. No global install, Go
 toolchain, or host Android SDK is required, but local APK builds require Docker.
 
 ## What it does
@@ -22,7 +22,7 @@ An arrow-key menu with four options:
 3. **Start a relay server** — runs `server/cmd/relay` from a local checkout if you have one (via `go run` or a local Docker build), or falls back to pulling the prebuilt `ghcr.io/turin-dev/rish-mcp-relay` image if you don't.
 4. **Exit**
 
-One thing it deliberately does **not** do: drive the Android 11+ wireless-pairing handshake itself. That happens on-device, inside the app — the whole point of rish-mcp not needing Shizuku or a PC in the loop. A PC's `adb` is only load-bearing for installing the APK and for the pre-Android-11 `adb tcpip` bridge; this tool covers exactly those two things, then hands off to the app's own pairing screen.
+One thing it deliberately does **not** do: drive the Android 11+ wireless-pairing handshake itself. That happens on-device inside the app. The app now prefers an explicitly authorized, ADB-mode Shizuku service and keeps on-device ADB as its fallback. A PC's `adb` is only load-bearing for installing the APK and for the pre-Android-11 `adb tcpip` bridge; this tool covers those steps, then hands off to the app's Shell access screen.
 
 ## Options
 

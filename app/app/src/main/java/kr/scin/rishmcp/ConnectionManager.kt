@@ -13,8 +13,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kr.scin.rishmcp.Prefs.adbHost
-import kr.scin.rishmcp.Prefs.adbPort
 import kr.scin.rishmcp.Prefs.deviceToken
 import kr.scin.rishmcp.Prefs.relayUrl
 import okhttp3.OkHttpClient
@@ -23,27 +21,28 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Owns the relay WebSocket and routes "exec" frames to [AdbShellClient].
+ * Owns the relay WebSocket and routes "exec" frames to the preferred shell
+ * backend (Shizuku first, on-device ADB as fallback).
  * Split out of AgentService so the service stays a thin foreground-service
  * shell (docs/DESIGN.md §2.1: "AdbShellClient/ConnectionManager 사용하도록
  * 내부 배선만 교체").
  *
- * Every device kind currently uses the same always-on WebSocket, same as the
- * old Shizuku agent. The low-spec/watch path in docs/DESIGN.md §3.2 — FCM
- * wake + a short-lived session instead of an always-on socket — is roadmap
- * step 4 and needs a Firebase project this app doesn't have wired up yet;
- * this is where that branch goes once it exists.
+ * Every device kind currently uses the same always-on WebSocket. Watches use
+ * longer ping/heartbeat intervals through [DeviceProfile].
  */
 class ConnectionManager(
     private val context: Context,
-    private val shellClient: AdbShellClient,
+    adbShellClient: AdbShellClient?,
     private val onStateChanged: () -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val shellBackends = ShellBackendManager(context, scope, adbShellClient, ::onShellStateChanged)
     private val main = Handler(Looper.getMainLooper())
     private val http by lazy {
         OkHttpClient.Builder()
@@ -56,7 +55,10 @@ class ConnectionManager(
     @Volatile private var ws: WebSocket? = null
     @Volatile private var stopped = false
     @Volatile private var connectedNetHandle = 0L
+    @Volatile private var publishedBackend: String? = null
     private val backoffMs = AtomicLong(1000)
+    private val reconnectScheduled = AtomicBoolean(false)
+    private val commandSlots = Semaphore(MAX_CONCURRENT_COMMANDS)
 
     /**
      * Monotonic generation counter for relay sockets. connectRelay() bumps it
@@ -76,7 +78,7 @@ class ConnectionManager(
     fun start() {
         stopped = false
         registerNetworkCallback()
-        ensureShellConnected()
+        shellBackends.start()
         connectRelay()
         main.postDelayed(heartbeat, DeviceProfile.heartbeatMs(context))
     }
@@ -84,8 +86,13 @@ class ConnectionManager(
     fun stop() {
         stopped = true
         main.removeCallbacksAndMessages(null)
-        runCatching { ws?.close(1000, "service stopping") }
+        reconnectScheduled.set(false)
+        epochGate.next()
+        val closing = ws
+        ws = null
+        runCatching { closing?.close(1000, "service stopping") }
         runCatching { connectivity.unregisterNetworkCallback(netCallback) }
+        shellBackends.stop()
         scope.cancel()
     }
 
@@ -93,7 +100,10 @@ class ConnectionManager(
     fun forceReconnect(reason: String) {
         if (stopped) return
         AgentState.lastEvent = "reconnect: $reason"
+        publishedBackend = null
         backoffMs.set(1000)
+        main.removeCallbacks(reconnect)
+        reconnectScheduled.set(false)
         // Bump the epoch BEFORE tearing down the socket: any callback the old
         // socket still fires (onFailure from the cancel, onClosed from the
         // close) then self-ignores, so it can neither schedule a duplicate
@@ -101,38 +111,15 @@ class ConnectionManager(
         epochGate.next()
         runCatching { ws?.cancel() }
         ws = null
-        ensureShellConnected()
+        shellBackends.ensureConnected()
         connectRelay()
-    }
-
-    // --- ADB shell connection -------------------------------------------------
-
-    private fun ensureShellConnected() {
-        if (shellClient.isConnected) return
-        val host = context.adbHost
-        val port = context.adbPort
-        if (port <= 0) {
-            AgentState.shell = "not paired"
-            onStateChanged()
-            return
-        }
-        scope.launch {
-            AgentState.shell = "connecting…"
-            onStateChanged()
-            AgentState.shell = try {
-                if (shellClient.connectDevice(host, port)) "connected" else "connect failed"
-            } catch (e: Throwable) {
-                Log.w(TAG, "adb connect failed", e)
-                "connect error: ${e.message}"
-            }
-            onStateChanged()
-        }
     }
 
     // --- relay WebSocket --------------------------------------------------------
 
     private fun connectRelay() {
         if (stopped) return
+        if (ws != null) return
         val url = context.relayUrl
         val token = context.deviceToken
         if (url.isBlank() || token.isBlank()) {
@@ -141,35 +128,28 @@ class ConnectionManager(
             onStateChanged()
             return
         }
-        val wsBase = when {
-            url.startsWith("ws") -> url
-            url.startsWith("http") -> "ws" + url.substring(4)
-            else -> "wss://$url"
-        }
-        val full = buildString {
-            append(wsBase)
-            append(if (wsBase.contains("?")) "&" else "?")
-            append("token=").append(token)
-            append("&deviceId=").append(Prefs.deviceId(context))
-            append("&name=").append(Build.MODEL.replace(" ", "_"))
-            append("&sdk=").append(Build.VERSION.SDK_INT)
-            append("&kind=").append(DeviceProfile.kind(context))
-            // Reported so the relay can flag agents older than the build it ships.
-            append("&ver=").append(BuildConfig.VERSION_NAME)
-            append("&vc=").append(BuildConfig.VERSION_CODE)
+        val full = buildRelayUrl(url, token)
+        if (full == null) {
+            AgentState.conn = AgentState.Conn.IDLE
+            AgentState.lastEvent = "invalid relay URL"
+            onStateChanged()
+            return
         }
         AgentState.conn = AgentState.Conn.CONNECTING
         onStateChanged()
         val epoch = epochGate.next()
+        publishedBackend = null
         ws = http.newWebSocket(Request.Builder().url(full).build(), listener(epoch))
     }
 
+    private val reconnect = Runnable {
+        reconnectScheduled.set(false)
+        if (!stopped && ws == null && AgentState.conn != AgentState.Conn.CONNECTED) connectRelay()
+    }
+
     private fun scheduleReconnect() {
-        if (stopped) return
-        main.postDelayed(
-            { if (AgentState.conn != AgentState.Conn.CONNECTED) connectRelay() },
-            backoffMs.get(),
-        )
+        if (stopped || !reconnectScheduled.compareAndSet(false, true)) return
+        main.postDelayed(reconnect, backoffMs.get())
         backoffMs.set((backoffMs.get() * 2).coerceAtMost(30_000))
     }
 
@@ -185,39 +165,38 @@ class ConnectionManager(
             AgentState.connectedSince = System.currentTimeMillis()
             AgentState.lastEvent = "connected"
             onStateChanged()
+            publishBackend(webSocket)
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (stale(webSocket)) return
+            if (text.length > CommandPolicy.MAX_FRAME_CHARS) {
+                Log.w(TAG, "oversized agent frame ignored (${text.length} chars)")
+                return
+            }
             val msg = try { JSONObject(text) } catch (_: Throwable) { return }
             if (msg.optString("type") != "exec") return
             val reqId = msg.optString("reqId")
             val cmd = msg.optString("cmd")
-            val timeoutMs = msg.optLong("timeoutMs", 60_000)
-            // Validate cmd against relay-side limits (maxCmdLen = 64 KiB in
-            // the Go relay). An empty or oversized cmd is rejected before it
-            // reaches the shell, which avoids a pointless ADB stream open and
-            // mirrors the server's own validation.
-            if (cmd.isBlank()) {
-                sendError(webSocket, reqId, "cmd is blank")
+            val timeoutMs = CommandPolicy.clampTimeout(msg.optLong("timeoutMs", 60_000))
+            CommandPolicy.validationError(reqId, cmd)?.let { detail ->
+                sendError(webSocket, reqId, detail)
                 return
             }
-            if (cmd.length > MAX_CMD_LEN) {
-                sendError(webSocket, reqId, "cmd too long (${cmd.length} > $MAX_CMD_LEN)")
+            if (!commandSlots.tryAcquire()) {
+                sendError(webSocket, reqId, "agent is busy ($MAX_CONCURRENT_COMMANDS commands already running)")
                 return
             }
             scope.launch {
                 val result = try {
-                    shellClient.exec(cmd, timeoutMs)
-                } catch (e: Throwable) {
-                    Log.w(TAG, "exec failed", e)
-                    ShellResult(
-                        code = -1,
-                        stdout = "",
-                        stderr = "exec error: ${e.message}",
-                        truncated = false,
-                        durationMs = 0,
-                    )
+                    try {
+                        shellBackends.exec(cmd, timeoutMs)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "exec failed", e)
+                        ShellResult.unavailable("exec error: ${e.message}")
+                    }
+                } finally {
+                    commandSlots.release()
                 }
                 AgentState.commandsRun++
                 AgentState.lastCommandAt = System.currentTimeMillis()
@@ -252,6 +231,7 @@ class ConnectionManager(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (stale(webSocket)) return
+            ws = null
             AgentState.conn = AgentState.Conn.DISCONNECTED
             AgentState.lastEvent = "disconnected: ${t.message}"
             onStateChanged()
@@ -260,6 +240,7 @@ class ConnectionManager(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (stale(webSocket)) return
+            ws = null
             AgentState.conn = AgentState.Conn.DISCONNECTED
             AgentState.lastEvent = "closed: $reason"
             onStateChanged()
@@ -314,16 +295,51 @@ class ConnectionManager(
     private val heartbeat = object : Runnable {
         override fun run() {
             if (stopped) return
-            ensureShellConnected()
-            if (AgentState.conn != AgentState.Conn.CONNECTED && AgentState.conn != AgentState.Conn.CONNECTING) {
+            shellBackends.ensureConnected()
+            if (ws == null && AgentState.conn != AgentState.Conn.CONNECTED &&
+                AgentState.conn != AgentState.Conn.CONNECTING
+            ) {
+                main.removeCallbacks(reconnect)
+                reconnectScheduled.set(false)
                 connectRelay()
             }
             main.postDelayed(this, DeviceProfile.heartbeatMs(context))
         }
     }
 
+    private fun buildRelayUrl(rawUrl: String, token: String) = RelayUrlPolicy.withAgentQuery(
+        rawUrl,
+        mapOf(
+            "token" to token,
+            "deviceId" to Prefs.deviceId(context),
+            "name" to Build.MODEL,
+            "sdk" to Build.VERSION.SDK_INT.toString(),
+            "kind" to DeviceProfile.kind(context),
+            "ver" to BuildConfig.VERSION_NAME,
+            "vc" to BuildConfig.VERSION_CODE.toString(),
+            "backend" to (shellBackends.activeKind?.wireName ?: "none"),
+        ),
+    )
+
+    private fun onShellStateChanged() {
+        onStateChanged()
+        ws?.let(::publishBackend)
+    }
+
+    private fun publishBackend(webSocket: WebSocket) {
+        val backend = shellBackends.activeKind?.wireName ?: "none"
+        if (publishedBackend == backend) return
+        val sent = webSocket.send(
+            JSONObject()
+                .put("type", "status")
+                .put("backend", backend)
+                .toString(),
+        )
+        if (sent) publishedBackend = backend
+    }
+
     companion object {
         private const val TAG = "rishmcp"
-        private const val MAX_CMD_LEN = 64 * 1024 // 64 KiB, symmetric with relay maxCmdLen
+        private const val MAX_CONCURRENT_COMMANDS = 4
     }
 }
