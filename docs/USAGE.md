@@ -91,7 +91,25 @@ the `websecure` entrypoint and the `letsencrypt` certificate resolver used by
 the labels in the Compose file. The Android WebSocket upgrade is handled by
 Traefik automatically.
 
-### 2.4 Run one container manually
+### 2.4 One-command relay installer
+
+The project landing page exposes a small installer for the self-hosted relay:
+
+```bash
+curl -fsSL https://rish-mcp.turin.my/relay | sh
+```
+
+It pulls `ghcr.io/turin-dev/rish-mcp-relay:latest`, creates random
+`AI_TOKEN`/`DEVICE_TOKEN` values when none are supplied, stores them in
+`~/.config/rish-mcp/relay.env` with mode `600`, and replaces only the named
+`rish-mcp-relay` container. The script publishes the container on host port
+`8080` by default; set `RISH_MCP_RELAY_PORT` or
+`RISH_MCP_RELAY_CONFIG_DIR` before running it to change those defaults. Put a
+TLS reverse proxy in front of that port before using the relay from an AI
+client or Android phone. The installer does not create DNS records or TLS
+certificates.
+
+### 2.5 Run one container manually
 
 For local testing without Traefik, run the relay directly:
 
@@ -105,7 +123,7 @@ docker run --rm -p 8080:8080 \
 For production, put a TLS reverse proxy in front of the container (nginx,
 Caddy, or Traefik) and forward WebSocket upgrades on `/agent`.
 
-### 2.5 Verify
+### 2.6 Verify
 
 ```bash
 curl -s https://mcp.example.com/healthz
