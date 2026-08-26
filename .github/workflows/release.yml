@@ -106,10 +106,9 @@ jobs:
                 "$unsigned"
               "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$signed"
               badging="$("$BUILD_TOOLS/aapt" dump badging "$signed")"
-              package_line="$(printf '%s\n' "$badging" | grep -F "package: name=")"
-              printf '%s\n' "$package_line" | grep -F "kr.scin.rishmcp"
-              printf '%s\n' "$package_line" | grep -F "versionName="
-              printf '%s\n' "$package_line" | grep -F "$RELEASE_VERSION"
+              package_line="$(printf '%s\n' "$badging" | grep -E "^package: name=")"
+              version_pattern="${RELEASE_VERSION//./\\.}"
+              printf '%s\n' "$package_line" | grep -Eq "^package: name='kr\\.scin\\.rishmcp' versionCode='[0-9]+' versionName='${version_pattern}'( |$)"
             '
 
       - name: Create checksum and enforce asset limit
