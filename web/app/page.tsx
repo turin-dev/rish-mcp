@@ -1,271 +1,105 @@
-import Journey from "@/components/Journey";
+const GITHUB_URL = "https://github.com/turin-dev/rish-mcp";
+const USAGE_URL = `${GITHUB_URL}/blob/master/docs/USAGE.md`;
+
+function Arrow() {
+  return <span aria-hidden="true">↗</span>;
+}
+
+function StatusDot({ color = "indigo" }: { color?: "indigo" | "green" | "orange" }) {
+  return <span className={`status-dot ${color}`} aria-hidden="true" />;
+}
+
+function DevicePreview() {
+  return (
+    <div className="device-preview" aria-label="rish-mcp device dashboard preview">
+      <div className="preview-sidebar">
+        <div className="preview-brand">rish<span>-</span>mcp</div>
+        <div className="preview-nav active"><span>⌂</span> Overview</div>
+        <div className="preview-nav"><span>⌁</span> Commands</div>
+        <div className="preview-nav"><span>◌</span> Devices</div>
+        <div className="preview-nav"><span>⚙</span> Settings</div>
+        <div className="preview-side-bottom"><StatusDot color="green" /> relay online</div>
+      </div>
+      <div className="preview-main">
+        <div className="preview-topbar"><span className="preview-breadcrumb">Overview</span><span className="preview-avatar">AI</span></div>
+        <div className="preview-heading"><div><div className="preview-kicker mono">YOUR DEVICE / 01</div><h3>Good morning, AI.</h3><p>Everything is connected and ready to run.</p></div><span className="online-chip"><StatusDot color="green" /> connected</span></div>
+        <div className="preview-stats">
+          <div><span className="preview-stat-label">DEVICE</span><strong>Pixel 8 Pro</strong><small>Android 15 · shell</small></div>
+          <div><span className="preview-stat-label">RELAY LATENCY</span><strong>142 ms</strong><small><span className="positive">↓ 18%</span> this week</small></div>
+        </div>
+        <div className="preview-command"><div className="command-heading"><span>Recent command</span><span className="mono">just now</span></div><div className="command-box mono"><span className="command-prompt">$</span> dumpsys battery <span className="command-check">✓</span></div><div className="command-output mono"><span>level: 81</span><span>status: charging</span><span>temperature: 29.4°C</span></div></div>
+      </div>
+    </div>
+  );
+}
+
+const featureCards = [
+  { icon: "◎", title: "Real hardware", body: "Work with the sensors, battery, OEM behavior, and Android build that actually matter." },
+  { icon: "↗", title: "Outbound by default", body: "Your phone dials the relay. No VPN, no open port, and no inbound connection to expose." },
+  { icon: "⌘", title: "MCP native", body: "Connect any compatible AI client and call run_shell or list_devices like regular tools." },
+  { icon: "▣", title: "Shell-level access", body: "Commands run at uid 2000, the same predictable ceiling as adb shell. No root required." },
+  { icon: "◌", title: "Self-hosted relay", body: "Keep the private control plane on infrastructure you own, with static bearer or OAuth." },
+  { icon: "⌁", title: "Small and focused", body: "A Go relay and one Android agent keep the path clear, inspectable, and easy to debug." },
+];
+
+const productCards = [
+  { label: "COMMAND CENTER", title: "Ask in plain language.", body: "Your AI turns a question into a shell command, then brings the result back with exit code and timing.", className: "product-command" },
+  { label: "DEVICE STATUS", title: "See what is really happening.", body: "Battery, network, package state, logs, and sensors — from the phone in your hand, not an emulator.", className: "product-device" },
+  { label: "SAFE CONNECTION", title: "One socket. No exposure.", body: "The Android agent keeps an outbound WebSocket to your relay and never listens for the internet.", className: "product-network" },
+  { label: "OPEN SOURCE", title: "Follow every hop.", body: "Go, Kotlin, and documented wire frames make the whole path available for inspection.", className: "product-source" },
+];
+
+const faqs = [
+  ["Does rish-mcp need root?", "No. Commands run as Android shell uid 2000 — the same privilege level as adb shell. Root-only operations still remain unavailable."],
+  ["Does the phone need an open port?", "No. The phone always makes the outbound connection to your relay, so it can work behind CGNAT without exposing an inbound device port."],
+  ["What does the first setup require?", "Android 11+ uses the phone's Wireless debugging pairing flow. Older devices use a one-time PC plus adb tcpip bridge."],
+  ["Can I use it with my AI client?", "Yes. The relay exposes a standard HTTP MCP endpoint with run_shell and list_devices. Static bearer authentication and OAuth are supported."],
+];
 
 export default function Home() {
   return (
-    <>
-      <header className="site">
-        <div className="wrap">
-          <div className="wordmark">
-            rish<span className="dot">-</span>mcp
-          </div>
-          <nav className="site">
-            <a href="https://github.com/turin-dev/rish-mcp" target="_blank" rel="noopener">
-              GitHub
-            </a>
+    <div className="site-shell">
+      <header className="site-header">
+        <div className="wrap header-inner">
+          <a className="wordmark" href="#top">rish<span>-</span>mcp</a>
+          <nav className="main-nav" aria-label="Main navigation">
+            <a href="#features">Features</a>
+            <a href="#product">Product</a>
+            <a href="#faq">FAQ</a>
           </nav>
+          <a className="header-button" href={USAGE_URL} target="_blank" rel="noopener">Get started <Arrow /></a>
         </div>
       </header>
 
-      <main>
+      <main id="top">
         <section className="hero">
-          <div className="wrap">
-            <p className="kicker">
-              <span className="led" />
-              rewrite in progress · rev 0.1
-            </p>
-            <h1>
-              Give your AI <em>a phone</em> to work with.
-            </h1>
-            <p className="lede">
-              rish-mcp exposes a real Android device&apos;s shell — <code>adb</code>-level, uid 2000 — to
-              any MCP client. No emulator standing in for the real thing. No VPN, no open port on the
-              device. Just an agent that dials out.
-            </p>
-            <div className="cta-row">
-              <a className="btn primary" href="https://github.com/turin-dev/rish-mcp" target="_blank" rel="noopener">
-                Read the source
-              </a>
-              <a
-                className="btn ghost"
-                href="https://github.com/turin-dev/rish-mcp/blob/master/docs/USAGE.md"
-                target="_blank"
-                rel="noopener"
-              >
-                Usage guide
-              </a>
+          <div className="wrap hero-grid">
+            <div className="hero-copy">
+              <div className="beta-badge"><StatusDot /> open source · public beta</div>
+              <h1>Your AI,<br /><em>with a real device.</em></h1>
+              <p>rish-mcp connects any MCP client to the Android phone you actually use. Inspect it, debug it, and let your AI work with the real thing.</p>
+              <div className="hero-actions"><a className="button primary" href={USAGE_URL} target="_blank" rel="noopener">Start building <Arrow /></a><a className="button secondary" href={GITHUB_URL} target="_blank" rel="noopener">View the source</a></div>
+              <div className="hero-trust mono"><span>✓</span> no emulator &nbsp;·&nbsp; no VPN &nbsp;·&nbsp; no root</div>
             </div>
+            <div className="hero-visual"><DevicePreview /><div className="floating-note note-one"><StatusDot color="green" /><span><strong>142 ms</strong><small>relay response</small></span></div><div className="floating-note note-two mono">uid 2000 <span>●</span></div></div>
           </div>
+          <div className="hero-orbit orbit-one" /><div className="hero-orbit orbit-two" />
         </section>
 
-        <section className="journey">
-          <div className="wrap">
-            <div className="journey-head">
-              <p className="eyebrow">how a command travels</p>
-              <h2>One outbound socket. Four hops, round trip.</h2>
-            </div>
-            <Journey />
-          </div>
-        </section>
+        <section className="proof-strip"><div className="wrap proof-grid"><div><strong>REAL DEVICE</strong><span>Not an emulator</span></div><div><strong>UID 2000</strong><span>Same as adb shell</span></div><div><strong>OUTBOUND ONLY</strong><span>No port exposed</span></div><div><strong>OPEN SOURCE</strong><span>Go + Kotlin</span></div></div></section>
 
-        <section className="example">
-          <div className="wrap">
-            <div className="section-head">
-              <p className="eyebrow">in practice</p>
-              <h2>Ask in plain language. It runs on the phone.</h2>
-            </div>
-            <div className="terminal mono">
-              <div className="bar">
-                <span />
-                <span />
-                <span />
-              </div>
-              <pre>
-                <span className="prompt">you</span>
-                {"    Is my phone's battery okay?\n"}
-                <span className="prompt">claude</span> <span className="call">{"run_shell({ cmd: \"dumpsys battery\" })"}</span>
-                {"\n"}
-                <span className="out">
-                  {"        exit=0 (142ms)\n        --- stdout ---\n        level: 81, status: charging, temperature: 29.4°C"}
-                </span>
-                {"\n"}
-                <span className="prompt">claude</span> Charging at 81%, running cool at 29°C — all good.
-              </pre>
-            </div>
-          </div>
-        </section>
+        <section className="features section" id="features"><div className="wrap"><div className="section-heading centered"><div className="eyebrow">01 / features</div><h2>Everything your AI needs<br /><em>from your actual phone.</em></h2><p>From shell commands to device state, rish-mcp keeps the useful parts close to the hardware.</p></div><div className="feature-grid">{featureCards.map((feature) => <article className="feature-card" key={feature.title}><span className="feature-icon">{feature.icon}</span><h3>{feature.title}</h3><p>{feature.body}</p><span className="feature-more">Learn more <Arrow /></span></article>)}</div></div></section>
 
-        <section className="why">
-          <div className="wrap">
-            <div className="section-head">
-              <p className="eyebrow">why this exists</p>
-              <h2>The gap between an AI and your actual device.</h2>
-            </div>
-            <div className="why-grid">
-              <div className="why-card">
-                <h3>Emulators lie.</h3>
-                <p>
-                  Assistants that develop against a virtual device never see the sensors, the battery
-                  quirks, or the OEM behavior of the phone in your pocket.
-                </p>
-              </div>
-              <div className="why-card">
-                <h3>&quot;Just run adb&quot; isn&apos;t help.</h3>
-                <p>
-                  When something breaks on-device, the usual answer is a shell command typed by hand.
-                  rish-mcp lets the AI run that command itself.
-                </p>
-              </div>
-              <div className="why-card">
-                <h3>No app to trust blindly.</h3>
-                <p>
-                  The previous build needed Shizuku — a separate app, a separate grant. This one pairs
-                  with the device&apos;s own <code className="mono">adbd</code> directly.
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
+        <section className="product section" id="product"><div className="wrap"><div className="section-heading centered"><div className="eyebrow">02 / product</div><h2>The real device,<br /><em>in one clear view.</em></h2><p>A small control plane for the commands, connection, and hardware that your AI needs to see.</p></div><div className="product-grid">{productCards.map((card) => <article className={`product-card ${card.className}`} key={card.title}><div className="product-card-copy"><span className="product-label mono">{card.label}</span><h3>{card.title}</h3><p>{card.body}</p></div><div className="product-art">{card.className === "product-command" && <><div className="art-terminal mono"><span className="art-muted">you</span> check my battery{`\n`}<span className="art-accent">run_shell({`{ cmd: 'dumpsys battery' }`})</span>{`\n`}<span className="art-green">exit=0&nbsp;&nbsp;level: 81&nbsp;&nbsp;charging</span></div></>}{card.className === "product-device" && <div className="art-device-card"><div className="art-device-icon">▯</div><div><strong>Pixel 8 Pro</strong><span>Android 15</span></div><StatusDot color="green" /></div>}{card.className === "product-network" && <div className="art-network"><span>AI</span><i /><span>relay</span><i /><span>phone</span></div>}{card.className === "product-source" && <div className="art-source mono"><span>go</span><span>kotlin</span><span>mcp</span><span>ws</span></div>}</div></article>)}</div></div></section>
 
-        <section className="components">
-          <div className="wrap">
-            <div className="section-head">
-              <p className="eyebrow">what&apos;s in the box</p>
-              <h2>Two Go binaries, one Android agent.</h2>
-            </div>
-            <div className="comp-grid">
-              <a
-                className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/master/server/cmd/relay"
-                target="_blank"
-                rel="noopener"
-              >
-                <span className="tag mono">server/cmd/relay</span>
-                <h3>Relay + MCP server</h3>
-                <p>
-                  Streamable-HTTP MCP endpoint (<code className="mono">run_shell</code>,{" "}
-                  <code className="mono">list_devices</code>) and the WebSocket the agent dials into.
-                  Static bearer or OAuth, your call.
-                </p>
-                <span className="more">Browse the source →</span>
-              </a>
-              <a className="comp-card" href="https://github.com/turin-dev/rish-mcp/tree/master/app" target="_blank" rel="noopener">
-                <span className="tag mono">app/</span>
-                <h3>Android agent</h3>
-                <p>
-                  Pairs with wireless debugging on Android 11+, or a PC + <code className="mono">adb tcpip</code>{" "}
-                  bridge below that. No third-party grant screen.
-                </p>
-                <span className="more">Browse the source →</span>
-              </a>
-              <a
-                className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/master/server/internal/oauth"
-                target="_blank"
-                rel="noopener"
-              >
-                <span className="tag mono">internal/oauth</span>
-                <h3>OAuth layer</h3>
-                <p>
-                  Stateless, HMAC-signed off your own token — no database. Rotate the token, every issued
-                  credential dies with it.
-                </p>
-                <span className="more">Browse the source →</span>
-              </a>
-              <a
-                className="comp-card"
-                href="https://github.com/turin-dev/rish-mcp/tree/master/server/cmd/publicserver"
-                target="_blank"
-                rel="noopener"
-              >
-                <span className="tag mono">server/cmd/publicserver</span>
-                <h3>Version server</h3>
-                <p>A second, secret-free binary that only answers &quot;what build is current&quot; and hands out the APK. No path to the relay.</p>
-                <span className="more">Browse the source →</span>
-              </a>
-            </div>
-          </div>
-        </section>
+        <section className="how section"><div className="wrap"><div className="section-heading"><div className="eyebrow">03 / how it works</div><h2>From question to<br /><em>command in seconds.</em></h2></div><div className="steps-grid"><article><span className="step-number">01</span><h3>Connect your device</h3><p>Pair the app with adbd, then let the Android agent dial your self-hosted relay.</p><span className="step-line" /></article><article><span className="step-number">02</span><h3>Connect your AI</h3><p>Add the relay&apos;s HTTP MCP endpoint to Claude or any compatible MCP client.</p><span className="step-line" /></article><article><span className="step-number">03</span><h3>Ask for the real thing</h3><p>Your AI calls the device, receives stdout and stderr, and explains what happened.</p><span className="step-line" /></article></div></div></section>
 
-        <section className="quickstart">
-          <div className="wrap">
-            <div className="section-head">
-              <p className="eyebrow">quick start</p>
-              <h2>Two binaries, one build.</h2>
-            </div>
-            <pre className="code-block mono">
-              <span className="rem"># server (both binaries)</span>
-              {"\n"}
-              <span className="kw">cd</span> server && go build ./... && go test ./...
-              {"\n\n"}
-              <span className="rem"># or as containers</span>
-              {"\n"}
-              docker build --target relay -t rishmcp-relay server
-              {"\n"}
-              docker build --target publicserver -t rishmcp-public server
-              {"\n\n"}
-              <span className="rem"># Android APK — Android SDK + Gradle run inside Docker, host stays clean</span>
-              {"\n"}
-              <span className="kw">cd</span> app && docker build -t rishmcp-android-build -f Dockerfile.build .
-            </pre>
-          </div>
-        </section>
+        <section className="faq section" id="faq"><div className="wrap faq-grid"><div className="section-heading"><div className="eyebrow">04 / FAQ</div><h2>Good to know<br /><em>before you start.</em></h2><a className="text-link" href={USAGE_URL} target="_blank" rel="noopener">Read the full usage guide <Arrow /></a></div><div className="faq-list">{faqs.map(([question, answer], index) => <details key={question} open={index === 0}><summary><span>{question}</span><b>+</b></summary><p>{answer}</p></details>)}</div></div></section>
 
-        <section className="status">
-          <div className="wrap">
-            <div className="section-head">
-              <p className="eyebrow">build log</p>
-              <h2>What&apos;s actually running.</h2>
-            </div>
-            <table className="status-table">
-              <thead>
-                <tr>
-                  <th>Rev</th>
-                  <th>Component</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td className="rev">0.1</td>
-                  <td>Go relay — MCP tools, WS relay</td>
-                  <td>
-                    <span className="pill ok">built · tested</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="rev">0.1</td>
-                  <td>Android agent — ADB pairing, shell exec</td>
-                  <td>
-                    <span className="pill ok">built · tested</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="rev">0.1</td>
-                  <td>OAuth layer</td>
-                  <td>
-                    <span className="pill ok">built · tested</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="rev">0.1</td>
-                  <td>Official version server</td>
-                  <td>
-                    <span className="pill ok">built · tested</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="rev">—</td>
-                  <td>Low-spec wake path (FCM)</td>
-                  <td>
-                    <span className="pill pending">blocked · needs Firebase project</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <section className="cta-section"><div className="wrap cta-panel"><div className="eyebrow">ready when you are</div><h2>Make your AI<br /><em>device-aware.</em></h2><p>Build the relay. Install the agent. Put the phone in the loop.</p><div className="hero-actions"><a className="button light" href={USAGE_URL} target="_blank" rel="noopener">Get started <Arrow /></a><a className="button outline-light" href={GITHUB_URL} target="_blank" rel="noopener">GitHub <Arrow /></a></div></div></section>
       </main>
 
-      <footer className="site">
-        <div className="wrap">
-          <span>MIT licensed · owner&apos;s own device only</span>
-          <span>
-            <a href="https://github.com/turin-dev/rish-mcp" target="_blank" rel="noopener">
-              github.com/turin-dev/rish-mcp
-            </a>
-          </span>
-        </div>
-      </footer>
-    </>
+      <footer className="site-footer"><div className="wrap footer-inner"><a className="wordmark" href="#top">rish<span>-</span>mcp</a><span>MIT licensed · owner&apos;s own device only</span><div><a href={USAGE_URL} target="_blank" rel="noopener">Docs</a><a href={GITHUB_URL} target="_blank" rel="noopener">GitHub <Arrow /></a></div></div></footer>
+    </div>
   );
 }
