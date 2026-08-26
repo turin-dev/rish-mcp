@@ -19,15 +19,21 @@ be exactly `MAJOR.MINOR.PATCH`. The prefix is configurable with
 `RELEASE_TAG_PREFIX`, but defaults to `agent-v`, preventing an old or unrelated
 APK from becoming the current agent by accident.
 
-The public version server ignores drafts, prereleases, malformed channel tags,
-and releases without an `.apk` asset. It selects the highest compatible tag by
-semantic version rather than GitHub release creation order. Once a rewrite APK
-is cached, a replacement must have both a greater tag version and a strictly
-greater Android `versionCode`; lower or equal versions are never downloaded as
-an update. Both downloaded and cached APKs are rejected when their embedded
-`versionName` differs from the tag suffix. Downloaded, cached, and `APK_PATH`
-override files are capped at 128 MiB; inflated `AndroidManifest.xml` data is
-bounded separately while parsing.
+By default, the public version server ignores drafts, prereleases, malformed
+channel tags, and releases without an `.apk` asset. It selects the highest
+compatible stable tag by semantic version rather than GitHub release creation
+order. A preview deployment can explicitly set
+`RELEASE_INCLUDE_PRERELEASE=true`; that opt-in includes published prereleases
+but still excludes drafts and retains all APK/version validation. The preview
+flag is intended for controlled testing and must not be confused with stable
+release acceptance.
+
+Once a rewrite APK is cached, a replacement must have both a greater tag
+version and a strictly greater Android `versionCode`; lower or equal versions
+are never downloaded as an update. Both downloaded and cached APKs are
+rejected when their embedded `versionName` differs from the tag suffix.
+Downloaded, cached, and `APK_PATH` override files are capped at 128 MiB;
+inflated `AndroidManifest.xml` data is bounded separately while parsing.
 
 The paginated release scan is capped at 1,000 entries. Reaching that bound
 before a final short page rejects the entire refresh, so the server never
@@ -46,7 +52,9 @@ The npm package `rish-mcp-setup` has its own independent semantic version. A
 CLI package version is not an Android agent version and must not be used to
 select an APK.
 
-No signed rewrite APK has been published yet.
+`agent-v0.1.0` is currently published as a signed GitHub prerelease for
+controlled preview testing. It is not a stable release because the real-device
+pairing, relay, command, and upgrade gates below are still outstanding.
 
 ## Publication gates
 
@@ -63,5 +71,6 @@ An `agent-vX.Y.Z` release is ready only after all of the following are recorded:
    a real supported Android device.
 7. Upgrade behavior from any supported prior rewrite release is verified.
 
-Build success alone is not release acceptance. Until these gates are met, use
-a locally built debug APK and do not advertise it as an official release.
+Build success alone is not stable release acceptance. A signed preview may be
+used for controlled testing, but until these gates are met it must not be
+advertised as a stable official release.
