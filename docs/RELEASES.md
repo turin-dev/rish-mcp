@@ -48,9 +48,11 @@ unresolved backup, removes non-current immutable APK artifacts. The cache is
 single-writer: run only one public-server process per `RELEASE_CACHE_DIR`.
 `APK_PATH` remains an explicit local override and bypasses GitHub polling.
 
-The npm package `rish-mcp-setup` has its own independent semantic version. A
-CLI package version is not an Android agent version and must not be used to
-select an APK.
+The npm package `rish-mcp-setup` has its own independent semantic version and
+is limited to relay-server installation and MCP-client configuration. It does
+not download, build, install, select, or update Android APKs. Android agent
+artifacts are handled only through the `agent-v*` release channel and related
+server-side release machinery.
 
 `agent-v0.1.0` is currently published as a signed GitHub prerelease for
 controlled preview testing. It is not a stable release because the real-device
