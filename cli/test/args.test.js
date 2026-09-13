@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, resolveServerURL } from "../args.js";
+import { parseArgs } from "../args.js";
 
 test("parseArgs recognizes help and version flags", () => {
   assert.equal(parseArgs(["--help"], {}).help, true);
@@ -19,28 +19,17 @@ test("parseArgs recognizes non-interactive flags", () => {
 });
 
 test("parseArgs supports equals and separate values", () => {
-  const equals = parseArgs(["--action=apk", "--server=https://example.test"], {});
-  assert.equal(equals.argValue("--action"), "apk");
-  assert.equal(equals.argValue("--server"), "https://example.test");
+  const equals = parseArgs(["--action=server", "--port=8080"], {});
+  assert.equal(equals.argValue("--action"), "server");
+  assert.equal(equals.argValue("--port"), "8080");
 
-  const separate = parseArgs(["--action", "relay", "--server", ""], {});
-  assert.equal(separate.argValue("--action"), "relay");
-  assert.equal(separate.argValue("--server"), "");
+  const separate = parseArgs(["--action", "client", "--url", "https://mcp.example.test/mcp"], {});
+  assert.equal(separate.argValue("--action"), "client");
+  assert.equal(separate.argValue("--url"), "https://mcp.example.test/mcp");
 });
 
 test("parseArgs does not consume another flag as a value", () => {
   const parsed = parseArgs(["--action", "--yes"], {});
   assert.equal(parsed.argValue("--action"), undefined);
   assert.equal(parsed.nonInteractive, true);
-});
-
-test("resolveServerURL fails closed unless a server is explicitly configured", () => {
-  assert.equal(resolveServerURL([], {}), "");
-  assert.equal(resolveServerURL([], { RISH_MCP_SERVER: "https://env.example" }), "https://env.example");
-  assert.equal(
-    resolveServerURL(["--server=https://cli.example"], { RISH_MCP_SERVER: "https://env.example" }),
-    "https://cli.example",
-  );
-  assert.equal(resolveServerURL(["--server="], { RISH_MCP_SERVER: "https://env.example" }), "");
-  assert.equal(resolveServerURL(["--server"], { RISH_MCP_SERVER: "https://env.example" }), "");
 });
