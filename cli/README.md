@@ -1,74 +1,95 @@
 # rish-mcp-setup
 
-Interactive installer for the [rish-mcp](https://github.com/turin-dev/rish-mcp) Android agent — the thing that lets an AI run shell commands on a real Android device over MCP.
+`rish-mcp-setup` is the npm setup utility for the **server side** of rish-mcp and for creating an **MCP client configuration**.
+
+It intentionally does **not** download, build, install, or update the Android APK. Android agent releases are handled separately through the signed GitHub release channel.
 
 ```bash
-git clone https://github.com/turin-dev/rish-mcp.git
-cd rish-mcp
-npx rish-mcp-setup --server=
+npx rish-mcp-setup
 ```
 
-The empty `--server=` value forces a local APK build. This is currently
-required because GitHub releases through `v0.5.0` contain the legacy
-Shizuku-based application, not the no-Shizuku rewrite. No global install, Go
-toolchain, or host Android SDK is required, but local APK builds require Docker.
+The menu contains only:
 
-## What it does
+1. **Install/update relay server** — pulls `ghcr.io/turin-dev/rish-mcp-relay:latest`, creates persistent `AI_TOKEN` and `DEVICE_TOKEN` values when needed, stores them under `~/.config/rish-mcp/relay.env`, and starts the relay with Docker.
+2. **Configure MCP client** — creates a standard `mcpServers` JSON entry pointing at the relay and stores it under `~/.config/rish-mcp/client.json`.
+3. **Exit**
 
-An arrow-key menu with four options:
+## Non-interactive usage
 
-1. **Full device setup** — makes sure `adb` is available (downloads platform-tools if it isn't), waits for a device to show up on `adb devices`, bridges pre-Android-11 devices over `adb tcpip`, gets an APK onto the device (downloaded from a configured version server, or built locally via Docker), installs it, and pre-fills the Relay URL / device token via the app's own intent-extras provisioning — nothing gets baked into the build.
-2. **Just build/download the APK** — the APK-acquisition step on its own.
-3. **Start a relay server** — runs `server/cmd/relay` from a local checkout if you have one (via `go run` or a local Docker build), or falls back to pulling the prebuilt `ghcr.io/turin-dev/rish-mcp-relay` image if you don't.
-4. **Exit**
-
-One thing it deliberately does **not** do: drive the Android 11+ wireless-pairing handshake itself. That happens on-device, inside the app — the whole point of rish-mcp not needing Shizuku or a PC in the loop. A PC's `adb` is only load-bearing for installing the APK and for the pre-Android-11 `adb tcpip` bridge; this tool covers exactly those two things, then hands off to the app's own pairing screen.
-
-## Options
+Install or update the relay server:
 
 ```bash
-npx rish-mcp-setup --server https://your-version-server.example.com
+npx rish-mcp-setup --yes --action server
 ```
 
-`--server` (or the `RISH_MCP_SERVER` env var) points at an explicitly trusted,
-rewrite-compatible rish-mcp version server. Without it, the safe default is to
-build locally with Docker. The legacy public APK must not be used with the
-current rewrite; see [`../docs/RELEASES.md`](../docs/RELEASES.md).
-
-### Non-interactive setup
-
-For scripts or a fresh machine where no one can answer prompts, pass `--yes`
-(or `-y`) and choose the menu action with `--action`:
+Create an MCP client configuration:
 
 ```bash
-# Full device setup; accepts defaults and uses RISH_MCP_* environment values.
-npx rish-mcp-setup --yes --action setup --server=
-
-# Only acquire an APK.
-npx rish-mcp-setup --yes --action apk --server=
-
-# Start the relay from a checkout, or use the published fallback image.
-npx rish-mcp-setup --yes --action relay
+npx rish-mcp-setup --yes --action client \
+  --url https://mcp.example.com/mcp \
+  --token "$AI_TOKEN"
 ```
 
-The equivalent environment switch is `RISH_MCP_YES=1`. Use `--help` to see
-all flags, or `--version` to print the installed package version:
+## Server options
+
+```bash
+npx rish-mcp-setup --action server \
+  --port 8080 \
+  --ai-token "$AI_TOKEN" \
+  --device-token "$DEVICE_TOKEN"
+```
+
+If tokens are omitted, the installer reuses values from `~/.config/rish-mcp/relay.env` when available and otherwise creates cryptographically random tokens. The relay is installed as the `rish-mcp-relay` Docker container with `--restart unless-stopped`.
+
+Environment equivalents:
+
+- `AI_TOKEN`
+- `DEVICE_TOKEN`
+- `RISH_MCP_RELAY_PORT`
+- `RISH_MCP_YES=1`
+
+Docker is required for the server action.
+
+## Client options
+
+```bash
+npx rish-mcp-setup --action client \
+  --url https://mcp.example.com/mcp \
+  --token "$AI_TOKEN"
+```
+
+The generated configuration looks like this:
+
+```json
+{
+  "mcpServers": {
+    "phone": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer <AI_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+If the relay was installed on the same machine, the client action can reuse the locally stored `AI_TOKEN` automatically. The generated file contains a bearer token, so it is written with owner-only permissions where supported.
+
+## Android agent
+
+The npm package has no APK code or Android tooling dependencies. Do not use it to install the Android app.
+
+Use the signed `agent-v*` GitHub release channel for Android artifacts and follow the release notes for pairing and device setup.
+
+## Other commands
 
 ```bash
 npx rish-mcp-setup --help
 npx rish-mcp-setup --version
 ```
 
-The CLI requires Node.js 18 or newer. Help and version output do not load the
-ZIP extraction dependency or contact the network. Downloads have a two-minute
-timeout and replace cached files only after the new file completes. Non-interactive
-mode still needs the real prerequisites for the selected action: Docker or a local
-APK/build for APK acquisition, and `adb` plus an authorized device for full setup.
-
-## Also available as a Go binary
-
-Same tool, same flow, ported 1:1 — see [`server/cmd/setup`](../server/cmd/setup)
-if you'd rather have a single static binary than a Node dependency.
+Node.js 18 or newer is required.
 
 ## License
 
