@@ -69,6 +69,7 @@ Wear OS performance, server code quality, no official version endpoint).
 | `ConnectionManager` / `AgentService` / `MainActivity` (pairing UI) | ✅ built, compiles — **not verified against a real device** |
 | Low-spec hybrid connection + FCM wake | ⛔ blocked — needs a Firebase project (see `docs/DESIGN.md` §7) |
 | Docker packaging for the Go binaries | ✅ `server/Dockerfile` (`--target relay` / `--target publicserver`) |
+| docker-compose / reverse-proxy deploy config | ✅ `docker-compose.yml` (Traefik/Dokploy) |
 | Signed rewrite APK | 🧪 `agent-v0.1.0` preview published — stable promotion pending real-device gates |
 
 ## Components
