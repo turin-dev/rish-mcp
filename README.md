@@ -32,9 +32,10 @@ call the relay's MCP endpoint.
 > [!CAUTION]
 > GitHub releases `v0.2.0` through `v0.5.0` contain the legacy Shizuku-based
 > application. They are not compatible release artifacts for this rewrite.
-> A signed, real-device-verified rewrite APK has not been published yet. Until
-> one is available, build the Android app from this checkout; see
-> [Release channels](docs/RELEASES.md) for the versioning boundary and gates.
+> A signed rewrite preview is available as `agent-v0.1.0`, but it has not yet
+> passed the real-device stable-release gates. Use it only for controlled
+> testing; see [Release channels](docs/RELEASES.md) for the exact acceptance
+> boundary and promotion gates.
 
 ## Why rewrite
 
@@ -68,8 +69,7 @@ Wear OS performance, server code quality, no official version endpoint).
 | `ConnectionManager` / `AgentService` / `MainActivity` (pairing UI) | ✅ built, compiles — **not verified against a real device** |
 | Low-spec hybrid connection + FCM wake | ⛔ blocked — needs a Firebase project (see `docs/DESIGN.md` §7) |
 | Docker packaging for the Go binaries | ✅ `server/Dockerfile` (`--target relay` / `--target publicserver`) |
-| docker-compose / reverse-proxy deploy config | ✅ `docker-compose.yml` (Traefik/Dokploy) |
-| Signed rewrite APK release | ⛔ not published — legacy releases are incompatible |
+| Signed rewrite APK | 🧪 `agent-v0.1.0` preview published — stable promotion pending real-device gates |
 
 ## Components
 
@@ -115,9 +115,14 @@ docker run --rm -v "$PWD/app:/work" -w /work rishmcp-android-build \
 # output: app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The rewrite does not yet have a supported release-signing command. Do not
-publish the debug APK as an official release; the acceptance and signing gates
-are documented in [`docs/RELEASES.md`](docs/RELEASES.md).
+Official signed rewrite APKs are built by the tag-driven
+[Android release workflow](.github/workflows/release.yml) from strict
+`agent-vMAJOR.MINOR.PATCH` tags. The workflow verifies tag/version metadata,
+builds and tests the release APK, signs it with the repository's official
+key, verifies the signature, publishes a SHA-256 checksum, and creates a
+GitHub **prerelease**. Do not promote that prerelease to stable until the
+real-device acceptance gates in [`docs/RELEASES.md`](docs/RELEASES.md) are
+recorded.
 
 ## Deploy
 
