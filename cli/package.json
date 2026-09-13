@@ -1,13 +1,12 @@
 {
   "name": "rish-mcp-setup",
-  "version": "0.8.1",
-  "description": "Interactive installer for the rish-mcp Android agent -- adb, pairing, APK, install.",
+  "version": "0.9.0",
+  "description": "Install the rish-mcp relay server or create MCP client configuration.",
   "keywords": [
     "rish-mcp",
     "mcp",
     "model-context-protocol",
     "android",
-    "adb",
     "cli",
     "installer",
     "setup",
@@ -30,7 +29,6 @@
   "files": [
     "index.js",
     "args.js",
-    "download.js",
     "README.md"
   ],
   "engines": {
@@ -38,8 +36,5 @@
   },
   "scripts": {
     "test": "node --test"
-  },
-  "dependencies": {
-    "adm-zip": "^0.6.0"
   }
 }
