@@ -21,13 +21,3 @@ export function parseArgs(argv = [], env = {}) {
 
   return { cliArgs, help, version, nonInteractive, argValue };
 }
-
-// APK downloads are opt-in. Releases from the legacy product generation must
-// never become the default merely because a public version server exists.
-export function resolveServerURL(argv = [], env = {}) {
-  const { cliArgs, argValue } = parseArgs(argv, env);
-  if (cliArgs.some((arg) => arg === "--server" || arg.startsWith("--server="))) {
-    return argValue("--server") ?? "";
-  }
-  return env.RISH_MCP_SERVER || "";
-}
