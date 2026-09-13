@@ -98,7 +98,8 @@ function randomToken() {
 }
 
 function configDir() {
-  const dir = path.join(homedir(), ".config", "rish-mcp");
+  const base = process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config");
+  const dir = path.join(base, "rish-mcp");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -107,6 +108,13 @@ function parsePort(raw) {
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     throw new Error(`invalid port: ${raw}`);
+  }
+  return value;
+}
+
+function validateEnvValue(name, value) {
+  if (!value || /[\r\n]/.test(value)) {
+    throw new Error(`${name} must be non-empty and must not contain newlines`);
   }
   return value;
 }
@@ -127,7 +135,7 @@ function readEnvFile(filePath) {
 async function chooseAction() {
   const requested = argValue("--action");
   if (requested) {
-    if (!['server', 'client'].includes(requested)) {
+    if (!["server", "client"].includes(requested)) {
       throw new Error(`--action must be server or client (got ${requested})`);
     }
     return requested;
@@ -158,11 +166,14 @@ async function installServer() {
   const relayEnvPath = path.join(configDir(), "relay.env");
   const previous = readEnvFile(relayEnvPath);
 
-  let aiToken = argValue("--ai-token") || process.env.AI_TOKEN || previous.AI_TOKEN || "";
-  let deviceToken = argValue("--device-token") || process.env.DEVICE_TOKEN || previous.DEVICE_TOKEN || "";
-
-  if (!aiToken) aiToken = randomToken();
-  if (!deviceToken) deviceToken = randomToken();
+  const aiToken = validateEnvValue(
+    "AI_TOKEN",
+    argValue("--ai-token") || process.env.AI_TOKEN || previous.AI_TOKEN || randomToken(),
+  );
+  const deviceToken = validateEnvValue(
+    "DEVICE_TOKEN",
+    argValue("--device-token") || process.env.DEVICE_TOKEN || previous.DEVICE_TOKEN || randomToken(),
+  );
 
   writeFileSync(
     relayEnvPath,
@@ -182,15 +193,28 @@ async function installServer() {
     "docker",
     [
       "run",
-      "-d",
+      "--detach",
       "--name",
       RELAY_CONTAINER,
       "--restart",
       "unless-stopped",
+      "--publish",
+      `${port}:8080`,
       "--env-file",
       relayEnvPath,
-      "-p",
-      `${port}:8080`,
+      "--env",
+      "PORT=8080",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:size=64m,noexec,nosuid,nodev",
+      "--cap-drop",
+      "ALL",
+      "--security-opt",
+      "no-new-privileges:true",
+      "--log-opt",
+      "max-size=10m",
+      "--log-opt",
+      "max-file=3",
       RELAY_IMAGE,
     ],
     { stdio: "inherit" },
@@ -199,11 +223,10 @@ async function installServer() {
 
   console.log();
   console.log(good("relay server installed"));
-  console.log(`MCP URL:      http://localhost:${port}/mcp`);
-  console.log(`AI_TOKEN:     ${aiToken}`);
-  console.log(`DEVICE_TOKEN: ${deviceToken}`);
-  console.log(`Secrets:      ${relayEnvPath}`);
-  console.log(dim("Keep both tokens secret. The Android app needs DEVICE_TOKEN; MCP clients use AI_TOKEN."));
+  console.log(`Local health: http://127.0.0.1:${port}/healthz`);
+  console.log(`MCP endpoint: http://127.0.0.1:${port}/mcp`);
+  console.log(`Credentials:  ${relayEnvPath}`);
+  console.log(dim("Place the relay behind HTTPS before exposing it publicly."));
 }
 
 async function configureClient() {
@@ -215,9 +238,7 @@ async function configureClient() {
 
   let token = argValue("--token") || process.env.AI_TOKEN || localRelay.AI_TOKEN || "";
   if (!token && !nonInteractive) token = await prompt("AI_TOKEN:");
-  if (!token) {
-    throw new Error("AI token is required; pass --token or set AI_TOKEN");
-  }
+  token = validateEnvValue("AI_TOKEN", token);
 
   const config = {
     mcpServers: {
