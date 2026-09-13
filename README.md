@@ -83,21 +83,30 @@ Wear OS performance, server code quality, no official version endpoint).
   `adbd` to run commands as shell uid, a foreground service holds the
   outbound WS, auto-starts on boot.
 
-## Quick start: local Android build and setup
+## Quick start: relay server and MCP client
 
-The currently published npm CLI still knows about the legacy download server,
-so explicitly disable remote APK download and build from this checkout:
+The npm package deliberately handles only server/client setup. It does not
+download, build, install, or update the Android APK.
 
 ```bash
-git clone https://github.com/turin-dev/rish-mcp.git
-cd rish-mcp
-npx rish-mcp-setup --server=
+# interactive menu: install relay server or create MCP client config
+npx rish-mcp-setup
+
+# non-interactive relay install/update
+npx rish-mcp-setup --yes --action server
+
+# non-interactive MCP client config
+npx rish-mcp-setup --yes --action client \
+  --url https://mcp.example.com/mcp \
+  --token "$AI_TOKEN"
 ```
 
-This requires Node.js 18+, Docker, and `adb`; it does not install the CLI
-globally. The empty `--server=` value is deliberate and forces a local build.
-For scripts, add `--yes --action setup|apk|relay`. See
-[`cli/README.md`](cli/README.md) for all options and prerequisites.
+The server action requires Docker. The client action writes a standard
+`mcpServers` entry under `~/.config/rish-mcp/client.json`. Android agent
+artifacts are distributed separately through the signed `agent-v*` GitHub
+release channel; local Android builds remain documented below.
+
+See [`cli/README.md`](cli/README.md) for all npm setup options.
 
 ## Build
 
