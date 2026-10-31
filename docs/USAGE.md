@@ -103,15 +103,33 @@ The site root returns the installer to command-line clients (curl, wget) and
 the landing page to browsers; `https://rish-mcp.turin.my/relay` serves the
 same script to everyone if you want to read it first.
 
-It pulls `ghcr.io/turin-dev/rish-mcp-relay:latest`, creates random
-`AI_TOKEN`/`DEVICE_TOKEN` values when none are supplied, stores them in
-`~/.config/rish-mcp/relay.env` with mode `600`, and replaces only the named
-`rish-mcp-relay` container. The script publishes the container on host port
-`8080` by default; set `RISH_MCP_RELAY_PORT` or
-`RISH_MCP_RELAY_CONFIG_DIR` before running it to change those defaults. Put a
-TLS reverse proxy in front of that port before using the relay from an AI
-client or Android phone. The installer does not create DNS records or TLS
-certificates.
+In a terminal it is interactive (answers are read from `/dev/tty`, so it works
+through the pipe): pick *install or update the relay server* or *configure an
+MCP client*, then confirm the host port, the public URL (`PUBLIC_URL`, needed
+for OAuth clients such as claude.ai) and whether to keep existing tokens. After
+the relay starts it waits for `/healthz` and offers to configure a client right
+away: it writes `~/.config/rish-mcp/client.json` and, if the `claude` CLI is
+installed, can run `claude mcp add` for you.
+
+The server action pulls `ghcr.io/turin-dev/rish-mcp-relay:latest`, creates
+random `AI_TOKEN`/`DEVICE_TOKEN` values when none exist, stores them (with the
+port and public URL) in `~/.config/rish-mcp/relay.env` with mode `600`, and
+replaces only the named `rish-mcp-relay` container. Re-running keeps the saved
+tokens unless you choose to regenerate them.
+
+Without a terminal, or with `--yes` / `RISH_MCP_YES=1`, it asks nothing and
+takes the defaults (server action, port `8080`, saved or new tokens):
+
+```bash
+curl -fsSL https://rish-mcp.turin.my | sh -s -- --yes --port 8080 --public-url https://mcp.example.com
+curl -fsSL https://rish-mcp.turin.my | sh -s -- client --url https://mcp.example.com/mcp
+curl -fsSL https://rish-mcp.turin.my | sh -s -- --help
+```
+
+`RISH_MCP_RELAY_PORT`, `RISH_MCP_RELAY_CONFIG_DIR`, `AI_TOKEN` and
+`DEVICE_TOKEN` also set the defaults. Put a TLS reverse proxy in front of the
+port before using the relay from an AI client or Android phone. The installer
+does not create DNS records or TLS certificates.
 
 ### 2.5 Run one container manually
 
