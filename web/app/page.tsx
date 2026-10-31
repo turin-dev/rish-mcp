@@ -283,7 +283,7 @@ export default function Home() {
             </div>
             <div className="install-block">
               <span className="mono">ONE COMMAND TO START</span>
-              <code>curl -fsSL https://rish-mcp.turin.my/relay | sh</code>
+              <code>curl -fsSL https://rish-mcp.turin.my | sh</code>
               <a href={RELAY_URL} target="_blank" rel="noopener">Open installer <Arrow /></a>
             </div>
           </div>

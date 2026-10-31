@@ -68,15 +68,13 @@ Android 에이전트는 사용자가 관리하는 릴레이 서버로 **아웃�
 
 ### 1. 릴레이 설정
 
-가장 쉬운 방법은 npm 설정 도구를 사용하는 것입니다. 서버 설치 작업에는 Docker가 필요합니다.
+Docker가 설치된 머신에서 설치 스크립트를 실행하세요. 다시 실행하면 릴레이가 업데이트됩니다.
 
 ```bash
-# 대화형 설정
-npx rish-mcp-setup
-
-# 또는 비대화형으로 릴레이 설치/업데이트
-npx rish-mcp-setup --yes --action server
+curl -fsSL https://rish-mcp.turin.my | sh
 ```
+
+실행 전에 스크립트 내용을 확인하려면 [`rish-mcp.turin.my/relay`](https://rish-mcp.turin.my/relay)를 열어 보세요. npm 도구로도 같은 작업을 할 수 있습니다: `npx rish-mcp-setup --yes --action server`.
 
 설치 도구는 `AI_TOKEN`과 `DEVICE_TOKEN`을 생성하거나 기존 값을 재사용하고, `~/.config/rish-mcp/relay.env`에 저장한 뒤 `rish-mcp-relay` 컨테이너를 실행합니다.
 
