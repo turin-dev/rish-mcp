@@ -1,7 +1,12 @@
 export const dynamic = "force-static";
 
 const INSTALLER = `#!/usr/bin/env sh
+# rish-mcp relay installer: curl -fsSL https://rish-mcp.turin.my | sh
 set -eu
+
+# Everything runs from main() at the end, so a download cut short by the
+# network never executes half a script.
+main() {
 
 IMAGE="\${RISH_MCP_RELAY_IMAGE:-ghcr.io/turin-dev/rish-mcp-relay:latest}"
 CONTAINER_NAME="\${RISH_MCP_RELAY_NAME:-rish-mcp-relay}"
@@ -82,6 +87,9 @@ printf 'Local health check: http://127.0.0.1:%s/healthz\\n' "$PORT"
 printf 'MCP endpoint (place behind HTTPS): /mcp\\n'
 printf 'Android WebSocket (place behind HTTPS): /agent\\n'
 printf 'Credentials saved with mode 600: %s\\n' "$ENV_FILE"
+}
+
+main "$@"
 `;
 
 export function GET() {

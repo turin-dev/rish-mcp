@@ -96,8 +96,12 @@ Traefik automatically.
 The project landing page exposes a small installer for the self-hosted relay:
 
 ```bash
-curl -fsSL https://rish-mcp.turin.my/relay | sh
+curl -fsSL https://rish-mcp.turin.my | sh
 ```
+
+The site root returns the installer to command-line clients (curl, wget) and
+the landing page to browsers; `https://rish-mcp.turin.my/relay` serves the
+same script to everyone if you want to read it first.
 
 It pulls `ghcr.io/turin-dev/rish-mcp-relay:latest`, creates random
 `AI_TOKEN`/`DEVICE_TOKEN` values when none are supplied, stores them in
