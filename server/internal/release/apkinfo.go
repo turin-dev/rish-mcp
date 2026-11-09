@@ -54,9 +54,11 @@ var (
 	infoCache    ApkInfo
 )
 
-// ReadApkInfo parses the APK at path. Cached on path+size+mtime, so replacing
-// the file (a fresh build landing) is picked up without a restart, distinct
-// immutable APKs cannot alias in the cache, and repeated requests stay cheap.
+// ReadApkInfo parses the APK at path. Results are cached by path and content
+// hash. A same-sized replacement is therefore picked up even when the
+// filesystem does not bump mtime, distinct immutable APKs cannot alias, and
+// identical bytes are not parsed twice. Size and mtime on a cache hit still
+// come from the current stat, so a touch is visible without another parse.
 func ReadApkInfo(path string) (ApkInfo, error) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -65,20 +67,24 @@ func ReadApkInfo(path string) (ApkInfo, error) {
 	if st.Size() > maxAPKDownloadBytes {
 		return ApkInfo{}, fmt.Errorf("APK is too large: %d bytes exceeds %d", st.Size(), maxAPKDownloadBytes)
 	}
-	key := fmt.Sprintf("%s:%d:%d", path, st.Size(), st.ModTime().UnixNano())
-
-	infoCacheMu.Lock()
-	if infoCacheKey == key {
-		cached := infoCache
-		infoCacheMu.Unlock()
-		return cached, nil
-	}
-	infoCacheMu.Unlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ApkInfo{}, err
 	}
+	sum := sha256.Sum256(data)
+	key := path + ":" + hex.EncodeToString(sum[:])
+
+	infoCacheMu.Lock()
+	if infoCacheKey == key {
+		cached := infoCache
+		infoCacheMu.Unlock()
+		cached.SizeBytes = st.Size()
+		cached.ModifiedAt = st.ModTime()
+		return cached, nil
+	}
+	infoCacheMu.Unlock()
+
 	info, err := parseApk(data)
 	if err != nil {
 		return ApkInfo{}, err

@@ -252,6 +252,33 @@ func TestReadApkInfoCachesOnUnchangedFile(t *testing.T) {
 	}
 }
 
+func TestReadApkInfoSeesSameSizeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.apk")
+	if err := os.WriteFile(path, buildTestApkBytes(t, 1, "1.0.0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ReadApkInfo(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buildTestApkBytes(t, 2, "2.0.0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Put the replacement back on the previous timestamp. A path+size+mtime
+	// cache would treat this as the same file; the content is not.
+	if err := os.Chtimes(path, first.ModifiedAt, first.ModifiedAt); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ReadApkInfo(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.VersionName != "2.0.0" || second.VersionCode != 2 || second.SHA256 == first.SHA256 {
+		t.Fatalf("stale cache after same-size replacement: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestReadApkInfoCacheSeparatesImmutablePaths(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{filepath.Join(dir, "one.apk"), filepath.Join(dir, "two.apk")}
