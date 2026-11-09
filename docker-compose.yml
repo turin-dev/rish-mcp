@@ -44,6 +44,7 @@ services:
       RELEASE_CACHE_DIR: /var/cache/rish-mcp
       DOWNLOADS_PER_HOUR: "${DOWNLOADS_PER_HOUR:-30}"
       RELEASE_POLL_MS: "${RELEASE_POLL_MS:-900000}"
+      RELEASE_INCLUDE_PRERELEASE: "${RELEASE_INCLUDE_PRERELEASE:-false}"
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     volumes:
       - public-release:/var/cache/rish-mcp
