@@ -285,6 +285,63 @@ func TestEnvOr(t *testing.T) {
 	}
 }
 
+func TestLoadPublicConfigDefaults(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("DOWNLOADS_PER_HOUR", "")
+	t.Setenv("TRUSTED_PROXIES", "")
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	if cfg.port != "8080" || cfg.downloadsPerHour != 30 || cfg.trustedProxies != "" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadPublicConfigAcceptsExplicitValues(t *testing.T) {
+	t.Setenv("PORT", "9090")
+	t.Setenv("DOWNLOADS_PER_HOUR", "12")
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.1, ::1")
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	if cfg.port != "9090" || cfg.downloadsPerHour != 12 || cfg.trustedProxies != "10.0.0.1, ::1" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadPublicConfigRejectsInvalidValues(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "port zero", env: map[string]string{"PORT": "0"}, want: "PORT"},
+		{name: "port too high", env: map[string]string{"PORT": "70000"}, want: "PORT"},
+		{name: "port text", env: map[string]string{"PORT": "abc"}, want: "PORT"},
+		{name: "downloads zero", env: map[string]string{"DOWNLOADS_PER_HOUR": "0"}, want: "DOWNLOADS_PER_HOUR"},
+		{name: "downloads negative", env: map[string]string{"DOWNLOADS_PER_HOUR": "-5"}, want: "DOWNLOADS_PER_HOUR"},
+		{name: "downloads text", env: map[string]string{"DOWNLOADS_PER_HOUR": "not-a-number"}, want: "DOWNLOADS_PER_HOUR"},
+		{name: "proxy typo", env: map[string]string{"TRUSTED_PROXIES": "10.0.0.1,not-an-ip"}, want: "TRUSTED_PROXIES"},
+		{name: "proxy empty entry", env: map[string]string{"TRUSTED_PROXIES": "10.0.0.1,,"}, want: "TRUSTED_PROXIES"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PORT", "")
+			t.Setenv("DOWNLOADS_PER_HOUR", "")
+			t.Setenv("TRUSTED_PROXIES", "")
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			_, err := loadConfigFromEnv()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnvInt(t *testing.T) {
 	t.Setenv("PUBLICSERVER_ENVINT_VALID", "42")
 	t.Setenv("PUBLICSERVER_ENVINT_INVALID", "not-a-number")
