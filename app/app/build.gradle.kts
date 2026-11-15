@@ -1,12 +1,17 @@
 plugins {
+    // AGP 9 compiles Kotlin itself. Applying kotlin-android conflicts with
+    // that built-in support (duplicate `kotlin` extension).
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "kr.scin.rishmcp"
-    compileSdk = 35
-    buildToolsVersion = "35.0.0"
+    // androidx.core:core-ktx 1.19.x refuses to compile below API 37.
+    // targetSdk stays 35 so the installed app does not opt into newer
+    // platform behavior. AGP 9.5's build-tools floor is 36.0.0, which is
+    // also what app/Dockerfile.build and the release workflow install.
+    compileSdk = 37
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "kr.scin.rishmcp"
@@ -32,19 +37,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.core:core-ktx:1.19.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     // Relay WebSocket client (ConnectionManager).
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     // Provisioning UI (MainActivity).
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("com.google.android.material:material:1.14.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 
     // On-device ADB client (pairing + connect + shell), replacing Shizuku.
@@ -61,7 +63,7 @@ dependencies {
     // Note: firebase-messaging-ktx is deprecated (its Kotlin extensions were
     // merged into the base artifact) and has no version mapping in recent
     // BoM releases — use firebase-messaging directly.
-    implementation(platform("com.google.firebase:firebase-bom:34.17.0"))
+    implementation(platform("com.google.firebase:firebase-bom:35.1.0"))
     implementation("com.google.firebase:firebase-messaging")
 
     testImplementation("junit:junit:4.13.2")
