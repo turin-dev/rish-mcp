@@ -1,17 +1,23 @@
 # Android build toolchain (SDK + Gradle) — used only to assemble/test the app.
 # Nothing from this image runs in production.
-FROM eclipse-temurin:17-jdk-jammy
+#
+# JDK 25 is the image JDK. Gradle 9.6 runs on it (Gradle 8.9 did not, which is
+# why the JDK 25 image bump failed on its own). App bytecode stays at JVM 17
+# via compileOptions in app/build.gradle.kts.
+FROM eclipse-temurin:25-jdk-jammy
 
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV DEBIAN_FRONTEND=noninteractive
-ARG CLT_VERSION=11076708
-ARG GRADLE_VERSION=8.9
+# cmdline-tools 23.0. The previous pin (11076708) predates API 37.
+ARG CLT_VERSION=16111833
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends unzip curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Android command-line tools + platform/build-tools for API 35
+# Android command-line tools + the platform/build-tools this project compiles
+# against. The SDK dir is read-only at build time, so every package AGP asks
+# for has to be installed here.
 RUN mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" && \
     curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${CLT_VERSION}_latest.zip" -o /tmp/clt.zip && \
     unzip -q /tmp/clt.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" && \
@@ -19,12 +25,19 @@ RUN mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" && \
     rm /tmp/clt.zip
 ENV PATH="$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools"
 RUN yes | sdkmanager --licenses >/dev/null 2>&1 && \
-    sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null && \
+    sdkmanager --install "platform-tools" "platforms;android-37.0" "build-tools;36.0.0" && \
+    test -d "$ANDROID_SDK_ROOT/platforms/android-37.0" && \
+    test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt" && \
     chmod -R a+rX "$ANDROID_SDK_ROOT"
 
-# Gradle (invoked directly; no wrapper needed)
-RUN curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/g.zip && \
+# Install the same Gradle the wrapper pins. CI invokes this gradle binary;
+# the wrapper is what local builds use.
+COPY gradle/wrapper/gradle-wrapper.properties /tmp/gradle-wrapper.properties
+RUN GRADLE_VERSION="$(sed -nE 's/^distributionUrl=.*gradle-([0-9.]+)-.*/\1/p' /tmp/gradle-wrapper.properties)" && \
+    test -n "$GRADLE_VERSION" && \
+    curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/g.zip && \
     unzip -q /tmp/g.zip -d /opt && rm /tmp/g.zip && \
-    ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle
+    ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle && \
+    rm /tmp/gradle-wrapper.properties
 
 WORKDIR /work

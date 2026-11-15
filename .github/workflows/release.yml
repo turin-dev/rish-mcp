@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     env:
       ANDROID_IMAGE: rishmcp-android-release
-      BUILD_TOOLS: /opt/android-sdk/build-tools/35.0.0
+      BUILD_TOOLS: /opt/android-sdk/build-tools/36.0.0
 
     steps:
       - name: Checkout
