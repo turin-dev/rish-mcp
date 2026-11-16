@@ -63,7 +63,7 @@ dependencies {
     // Note: firebase-messaging-ktx is deprecated (its Kotlin extensions were
     // merged into the base artifact) and has no version mapping in recent
     // BoM releases — use firebase-messaging directly.
-    implementation(platform("com.google.firebase:firebase-bom:35.1.0"))
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
     implementation("com.google.firebase:firebase-messaging")
 
     testImplementation("junit:junit:4.13.2")
