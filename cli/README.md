@@ -47,8 +47,14 @@ Environment equivalents:
 - `DEVICE_TOKEN`
 - `RISH_MCP_RELAY_PORT`
 - `RISH_MCP_YES=1`
+- `NO_COLOR` — disable ANSI color when set
+- `XDG_CONFIG_HOME` — parent of the `rish-mcp` config directory (default `~/.config`)
 
-Docker is required for the server action.
+Docker is required for the server action. This action does not set `PUBLIC_URL`.
+The relay then defaults that value to `http://localhost:8080`, which is enough
+for a local bearer-token client and wrong for OAuth clients such as claude.ai.
+Use the curl installer (it asks for the public URL), or set `PUBLIC_URL` on the
+container yourself, before relying on OAuth.
 
 ## Client options
 
@@ -75,6 +81,8 @@ The generated configuration looks like this:
 ```
 
 If the relay was installed on the same machine, the client action can reuse the locally stored `AI_TOKEN` automatically. The generated file contains a bearer token, so it is written with owner-only permissions where supported.
+
+`RISH_MCP_URL` sets the default MCP endpoint when `--url` is omitted. Without either, the default is `http://localhost:8080/mcp`.
 
 ## Android agent
 

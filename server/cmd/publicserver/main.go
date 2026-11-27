@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -27,12 +28,10 @@ import (
 )
 
 func main() {
-	port := envOr("PORT", "8080")
-	downloadsPerHour := envInt("DOWNLOADS_PER_HOUR", 30)
-	// TRUSTED_PROXIES: comma-separated list of proxy IPs that can set X-Forwarded-For.
-	// Empty string = no proxies trusted, only use RemoteAddr (safe default).
-	// Use only if behind a reverse proxy like Traefik.
-	trustedProxies := envOr("TRUSTED_PROXIES", "")
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	src := release.NewSource(release.SourceOptionsFromEnv())
 
@@ -40,18 +39,18 @@ func main() {
 	defer cancel()
 	src.Start(ctx)
 
-	mux := newMux(src, downloadsPerHour, trustedProxies)
+	mux := newMux(src, cfg.downloadsPerHour, cfg.trustedProxies)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{Addr: ":" + cfg.port, Handler: mux}
 	go func() {
 		<-stop
 		cancel()
 		_ = srv.Close()
 	}()
 
-	log.Printf("rish-mcp public release endpoint on :%s", port)
+	log.Printf("rish-mcp public release endpoint on :%s", cfg.port)
 	log.Printf("  GET /api/version/release   current agent build")
 	log.Printf("  GET /agent.apk             that build, unauthenticated")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -229,6 +228,65 @@ func sanitizeHeaderValue(s string) string {
 		}
 	}
 	return b.String()
+}
+
+type publicConfig struct {
+	port             string
+	downloadsPerHour int
+	trustedProxies   string
+}
+
+// loadConfigFromEnv rejects values that would otherwise start the process in a
+// surprising state: PORT "0" binds a random port, a non-positive
+// DOWNLOADS_PER_HOUR makes the first download look rate-limited, and a typo in
+// TRUSTED_PROXIES would silently ignore X-Forwarded-For. The relay already
+// refuses the same PORT and TRUSTED_PROXIES mistakes.
+func loadConfigFromEnv() (publicConfig, error) {
+	port := envOr("PORT", "8080")
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return publicConfig{}, fmt.Errorf("PORT must be an integer from 1 to 65535")
+	}
+	downloadsPerHour, err := positiveIntEnv("DOWNLOADS_PER_HOUR", 30)
+	if err != nil {
+		return publicConfig{}, err
+	}
+	// TRUSTED_PROXIES: comma-separated list of proxy IPs that can set X-Forwarded-For.
+	// Empty string = no proxies trusted, only use RemoteAddr (safe default).
+	// Use only if behind a reverse proxy like Traefik.
+	trustedProxies := envOr("TRUSTED_PROXIES", "")
+	if err := validateTrustedProxies(trustedProxies); err != nil {
+		return publicConfig{}, err
+	}
+	return publicConfig{
+		port:             port,
+		downloadsPerHour: downloadsPerHour,
+		trustedProxies:   trustedProxies,
+	}, nil
+}
+
+func positiveIntEnv(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return n, nil
+}
+
+func validateTrustedProxies(trustedProxies string) error {
+	if trustedProxies == "" {
+		return nil
+	}
+	for _, ip := range strings.Split(trustedProxies, ",") {
+		ip = strings.TrimSpace(ip)
+		if ip == "" || net.ParseIP(ip) == nil {
+			return fmt.Errorf("TRUSTED_PROXIES contains invalid IP: %q", ip)
+		}
+	}
+	return nil
 }
 
 func envOr(key, def string) string {

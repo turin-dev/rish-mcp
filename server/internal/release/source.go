@@ -93,7 +93,10 @@ type SourceOptions struct {
 func SourceOptionsFromEnv() SourceOptions {
 	pollMs := int64(defaultReleasePollEvery / time.Millisecond)
 	if v := os.Getenv("RELEASE_POLL_MS"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			log.Printf("invalid RELEASE_POLL_MS %q; using default %dms", v, defaultReleasePollEvery/time.Millisecond)
+		} else {
 			pollMs = n
 		}
 	}

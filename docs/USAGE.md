@@ -60,7 +60,7 @@ See [Appendix B](#appendix-b-environment-variables) for the full list. At minimu
 
 ```bash
 AI_TOKEN=$(openssl rand -hex 32)      # master key for AI clients
-DEVICE_TOKEN=$(openssl rand -hex 24)  # shared secret the phone presents
+DEVICE_TOKEN=$(openssl rand -hex 32)  # shared secret the phone presents
 PUBLIC_URL=https://mcp.example.com    # external origin, for OAuth metadata/redirects
 TRUSTED_PROXIES=172.18.0.1          # optional proxy IP(s), comma-separated
 ```
@@ -85,6 +85,9 @@ Set `TRUSTED_PROXIES` to the direct IP address(es) of the reverse proxy (comma-s
 when Traefik/nginx supplies `X-Forwarded-For`; with it empty, the server uses the
 socket peer address and ignores client-supplied forwarding headers. Configure the
 same variable on both relay and publicserver when both sit behind the same proxy.
+`RELEASE_INCLUDE_PRERELEASE=true` in `.env` is forwarded to the public server
+and opts that process into published GitHub prereleases. Drafts stay excluded,
+and the default is `false`.
 The publicserver is routed at `PUBLIC_MCP_HOST`, has no tokens, and serves
 only `/healthz`, `/api/version/release`, and `/agent.apk`. Traefik must expose
 the `websecure` entrypoint and the `letsencrypt` certificate resolver used by
@@ -347,6 +350,14 @@ Connection query params on `GET /agent`: `token`, `deviceId`, `name`, `sdk`,
 `kind=watch`; a device missing ~2.5 ping cycles is dropped.
 
 ## Appendix B: environment variables
+
+The relay and the public server exit at startup when `PORT` or `TRUSTED_PROXIES`
+is set to a value they cannot use. `PORT` must be an integer from 1 to 65535.
+`TRUSTED_PROXIES` is a comma-separated list of IP addresses (spaces around
+commas are fine); hostnames and CIDR blocks are not accepted. The public server
+also exits when `DOWNLOADS_PER_HOUR` is set to anything other than a positive
+integer, including `0`. An invalid `RELEASE_POLL_MS` does not stop the process:
+the public server logs the problem and keeps the 15 minute default.
 
 ### `server/cmd/relay`
 
